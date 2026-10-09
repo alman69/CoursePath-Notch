@@ -15,87 +15,123 @@ import SwiftUIIntrospect
 
 struct SettingsView: View {
     @State private var selectedTab = "General"
+    @State private var searchQuery = ""
+    @State private var searchSection: String?
+    @State private var highlightedSection: String?
+    @State private var searchNotice: String?
+    @State private var searchRequest = UUID()
     @State private var accentColorUpdateTrigger = UUID()
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selectedTab) {
-                NavigationLink(value: "General") {
-                    Label("General", systemImage: "gear")
+            VStack(spacing: 0) {
+                SettingsSearchSidebar(query: $searchQuery) { entry, reason in
+                    selectedTab = entry.category
+                    searchSection = entry.sectionID
+                    searchNotice = reason
+                    searchRequest = UUID()
                 }
-                NavigationLink(value: "Appearance") {
-                    Label("Appearance", systemImage: "eye")
+                List(selection: $selectedTab) {
+                    NavigationLink(value: "General") {
+                        Label("General", systemImage: "gear")
+                    }
+                    NavigationLink(value: "Appearance") {
+                        Label("Appearance", systemImage: "eye")
+                    }
+                    NavigationLink(value: "Media") {
+                        Label("Media", systemImage: "play.laptopcomputer")
+                    }
+                    NavigationLink(value: "Calendar") {
+                        Label("Calendar", systemImage: "calendar")
+                    }
+                    NavigationLink(value: "CoursePath") {
+                        Label("CoursePath", systemImage: "link")
+                    }
+                    NavigationLink(value: "HUD") {
+                        Label("HUDs", systemImage: "dial.medium.fill")
+                    }
+                    NavigationLink(value: "Battery") {
+                        Label("Battery", systemImage: "battery.100.bolt")
+                    }
+    //                NavigationLink(value: "Downloads") {
+    //                    Label("Downloads", systemImage: "square.and.arrow.down")
+    //                }
+                    NavigationLink(value: "Shelf") {
+                        Label("Shelf", systemImage: "books.vertical")
+                    }
+                    NavigationLink(value: "Shortcuts") {
+                        Label("Shortcuts", systemImage: "keyboard")
+                    }
+                    // NavigationLink(value: "Extensions") {
+                    //     Label("Extensions", systemImage: "puzzlepiece.extension")
+                    // }
+                    NavigationLink(value: "Advanced") {
+                        Label("Advanced", systemImage: "gearshape.2")
+                    }
+                    NavigationLink(value: "About") {
+                        Label("About", systemImage: "info.circle")
+                    }
                 }
-                NavigationLink(value: "Media") {
-                    Label("Media", systemImage: "play.laptopcomputer")
-                }
-                NavigationLink(value: "Calendar") {
-                    Label("Calendar", systemImage: "calendar")
-                }
-                NavigationLink(value: "CoursePath") {
-                    Label("CoursePath", systemImage: "link")
-                }
-                NavigationLink(value: "HUD") {
-                    Label("HUDs", systemImage: "dial.medium.fill")
-                }
-                NavigationLink(value: "Battery") {
-                    Label("Battery", systemImage: "battery.100.bolt")
-                }
-//                NavigationLink(value: "Downloads") {
-//                    Label("Downloads", systemImage: "square.and.arrow.down")
-//                }
-                NavigationLink(value: "Shelf") {
-                    Label("Shelf", systemImage: "books.vertical")
-                }
-                NavigationLink(value: "Shortcuts") {
-                    Label("Shortcuts", systemImage: "keyboard")
-                }
-                // NavigationLink(value: "Extensions") {
-                //     Label("Extensions", systemImage: "puzzlepiece.extension")
-                // }
-                NavigationLink(value: "Advanced") {
-                    Label("Advanced", systemImage: "gearshape.2")
-                }
-                NavigationLink(value: "About") {
-                    Label("About", systemImage: "info.circle")
-                }
+                .listStyle(SidebarListStyle())
+                .tint(.effectiveAccent)
+                .toolbar(removing: .sidebarToggle)
             }
-            .listStyle(SidebarListStyle())
-            .tint(.effectiveAccent)
-            .toolbar(removing: .sidebarToggle)
             .navigationSplitViewColumnWidth(200)
         } detail: {
-            Group {
-                switch selectedTab {
-                case "General":
-                    GeneralSettings()
-                case "Appearance":
-                    Appearance()
-                case "Media":
-                    Media()
-                case "Calendar":
-                    CalendarSettings()
-                case "CoursePath":
-                    CoursePathConnectionSettings()
-                case "HUD":
-                    HUD()
-                case "Battery":
-                    Charge()
-                case "Shelf":
-                    Shelf()
-                case "Shortcuts":
-                    Shortcuts()
-                case "Extensions":
-                    GeneralSettings()
-                case "Advanced":
-                    Advanced()
-                case "About":
-                    About()
-                default:
-                    GeneralSettings()
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    if let searchNotice {
+                        Text(searchNotice).font(.callout).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                    }
+                    Group {
+                        switch selectedTab {
+                        case "General":
+                            GeneralSettings()
+                        case "Appearance":
+                            Appearance()
+                        case "Media":
+                            Media()
+                        case "Calendar":
+                            CalendarSettings()
+                        case "CoursePath":
+                            CoursePathConnectionSettings()
+                        case "HUD":
+                            HUD()
+                        case "Battery":
+                            Charge()
+                        case "Shelf":
+                            Shelf()
+                        case "Shortcuts":
+                            Shortcuts()
+                        case "Extensions":
+                            GeneralSettings()
+                        case "Advanced":
+                            Advanced()
+                        case "About":
+                            About()
+                        default:
+                            GeneralSettings()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .environment(\.settingsSearchHighlight, highlightedSection)
+                }
+                .task(id: searchRequest) {
+                    guard let searchSection else { return }
+                    // Let the destination Form mount before scrolling to its real section.
+                    do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                    withAnimation { proxy.scrollTo(searchSection, anchor: .top) }
+                    highlightedSection = searchSection
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    highlightedSection = nil
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onChange(of: selectedTab) { _, newTab in
+            if !SettingsSearchIndex.entries.contains(where: { $0.category == newTab && $0.sectionID == searchSection }) {
+                searchSection = nil; highlightedSection = nil; searchNotice = nil
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar(removing: .sidebarToggle)
@@ -184,6 +220,7 @@ struct GeneralSettings: View {
             } header: {
                 Text("System features")
             }
+            .settingsSearchSection("general.system")
 
             Section {
                 Picker(
@@ -251,6 +288,7 @@ struct GeneralSettings: View {
             } header: {
                 Text("Notch sizing")
             }
+            .settingsSearchSection("general.sizing")
 
             NotchBehaviour()
 
@@ -309,6 +347,7 @@ struct GeneralSettings: View {
             .foregroundStyle(.secondary)
             .font(.caption)
         }
+            .settingsSearchSection("general.gestures")
     }
 
     @ViewBuilder
@@ -338,6 +377,7 @@ struct GeneralSettings: View {
         } header: {
             Text("Notch behavior")
         }
+            .settingsSearchSection("general.behavior")
     }
 }
 
@@ -354,6 +394,7 @@ struct Charge: View {
             } header: {
                 Text("General")
             }
+            .settingsSearchSection("battery.general")
             Section {
                 Defaults.Toggle(key: .showBatteryPercentage) {
                     Text("Show battery percentage")
@@ -364,6 +405,7 @@ struct Charge: View {
             } header: {
                 Text("Battery Information")
             }
+            .settingsSearchSection("battery.information")
         }
         .onAppear {
             Task { @MainActor in
@@ -500,6 +542,7 @@ struct HUD: View {
                     .padding(.top, 6)
                 }
             }
+            .settingsSearchSection("hud.system")
             
             Section {
                 Picker("Option key behaviour", selection: $optionKeyAction) {
@@ -523,6 +566,7 @@ struct HUD: View {
             } header: {
                 Text("General")
             }
+            .settingsSearchSection("hud.general")
             .disabled(!hudReplacement)
             
             Section {
@@ -539,6 +583,7 @@ struct HUD: View {
                     customBadge(text: "Beta")
                 }
             }
+            .settingsSearchSection("hud.open")
             .disabled(!hudReplacement)
             
             Section {
@@ -563,6 +608,7 @@ struct HUD: View {
             } header: {
                 Text("Closed Notch")
             }
+            .settingsSearchSection("hud.closed")
             .disabled(!Defaults[.hudReplacement])
         }
         .accentColor(.effectiveAccent)
@@ -631,6 +677,7 @@ struct Media: View {
                     .font(.caption)
                 }
             }
+            .settingsSearchSection("media.source")
             
             Section {
                 Toggle(
@@ -669,6 +716,7 @@ struct Media: View {
             } header: {
                 Text("Media playback live activity")
             }
+            .settingsSearchSection("media.activity")
             
             Section {
                 MusicSlotConfigurationView()
@@ -685,6 +733,7 @@ struct Media: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .settingsSearchSection("media.controls")
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("Media")
@@ -712,6 +761,7 @@ struct CalendarSettings: View {
             Defaults.Toggle(key: .showCalendar) {
                 Text("Show calendar")
             }
+            .settingsSearchSection("calendar.general")
             Defaults.Toggle(key: .hideCompletedReminders) {
                 Text("Hide completed reminders")
             }
@@ -760,6 +810,7 @@ struct CalendarSettings: View {
                     }
                 }
             }
+            .settingsSearchSection("calendar.calendars")
             Section(header: Text("Reminders")) {
                 if calendarManager.reminderAuthorizationStatus != .fullAccess {
                     Text("Reminder access is denied. Please enable it in System Settings.")
@@ -796,6 +847,7 @@ struct CalendarSettings: View {
                     }
                 }
             }
+            .settingsSearchSection("calendar.reminders")
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("Calendar")
@@ -856,6 +908,7 @@ struct About: View {
                 } header: {
                     Text("Version info")
                 }
+            .settingsSearchSection("about.version")
 
                 HStack(spacing: 30) {
                     Spacer(minLength: 0)
@@ -876,6 +929,7 @@ struct About: View {
                     Spacer(minLength: 0)
                 }
                 .buttonStyle(PlainButtonStyle())
+                .settingsSearchSection("about.links")
             }
             VStack(spacing: 0) {
                 Divider()
@@ -937,6 +991,7 @@ struct Shelf: View {
                     Text("General")
                 }
             }
+            .settingsSearchSection("shelf.general")
             
             Section {
                 Picker("Quick Share Service", selection: $quickShareProvider) {
@@ -995,6 +1050,7 @@ struct Shelf: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            .settingsSearchSection("shelf.share")
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("Shelf")
@@ -1166,6 +1222,7 @@ struct Appearance: View {
             } header: {
                 Text("General")
             }
+            .settingsSearchSection("appearance.general")
 
             Section {
                 Defaults.Toggle(key: .coloredSpectrogram) {
@@ -1184,6 +1241,7 @@ struct Appearance: View {
             } header: {
                 Text("Media")
             }
+            .settingsSearchSection("appearance.media")
 
             Section {
                 Toggle(
@@ -1220,6 +1278,7 @@ struct Appearance: View {
                     customBadge(text: "Coming soon")
                 }
             }
+            .settingsSearchSection("appearance.animation")
 
             Section {
                 List {
@@ -1358,6 +1417,7 @@ struct Appearance: View {
                     }
                 }
             }
+            .settingsSearchSection("appearance.visualizers")
 
             Section {
                 Defaults.Toggle(key: .showMirror) {
@@ -1378,6 +1438,7 @@ struct Appearance: View {
                     Text("Additional features")
                 }
             }
+            .settingsSearchSection("appearance.features")
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("Appearance")
@@ -1536,6 +1597,7 @@ struct Advanced: View {
                     .foregroundStyle(.secondary)
                     .font(.caption)
             }
+            .settingsSearchSection("advanced.accent")
             .onAppear {
                 initializeAccentColorState()
             }
@@ -1550,6 +1612,7 @@ struct Advanced: View {
             } header: {
                 Text("Window Appearance")
             }
+            .settingsSearchSection("advanced.appearance")
             
             Section {
                 HStack {
@@ -1594,6 +1657,7 @@ struct Advanced: View {
                     customBadge(text: "Coming soon")
                 }
             }
+            .settingsSearchSection("advanced.icon")
             
             Section {
                 Defaults.Toggle(key: .extendHoverArea) {
@@ -1611,6 +1675,7 @@ struct Advanced: View {
             } header: {
                 Text("Window Behavior")
             }
+            .settingsSearchSection("advanced.behavior")
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("Advanced")
@@ -1720,9 +1785,11 @@ struct Shortcuts: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
             }
+            .settingsSearchSection("shortcuts.media")
             Section {
                 KeyboardShortcuts.Recorder("Toggle Notch Open:", name: .toggleNotchOpen)
             }
+            .settingsSearchSection("shortcuts.notch")
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("Shortcuts")

@@ -6,21 +6,21 @@
 //
 
 import SwiftUI
+import Defaults
 
 struct TabModel: Identifiable {
-    let id = UUID()
+    var id: NotchViews { view }
     let label: String
     let icon: String
     let view: NotchViews
 }
 
-let tabs = [
-    TabModel(label: "Home", icon: "house.fill", view: .home),
-    TabModel(label: "Shelf", icon: "tray.fill", view: .shelf)
-]
-
 struct TabSelectionView: View {
     @ObservedObject var coordinator = BoringViewCoordinator.shared
+    @Default(.boringShelf) private var shelfEnabled
+    private var tabs: [TabModel] {
+        NotchViews.visibleTabs(shelfEnabled: shelfEnabled).map { TabModel(label: $0.label, icon: $0.icon, view: $0) }
+    }
     @Namespace var animation
     var body: some View {
         HStack(spacing: 0) {

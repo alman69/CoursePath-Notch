@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import AppKit
 @testable import CoursePathConnection
 
 private let testToken = "cpn_" + String(repeating: "a", count: 43)
@@ -40,6 +41,8 @@ private final class MemoryCredentials: CoursePathCredentialStorage {
     var writes: [(String, Bool, Int)] = []
     var hold = false
     var held: CheckedContinuation<CoursePathSnapshot, Error>?
+    var holdMutation = false
+    var heldMutation: CheckedContinuation<Void, Never>?
     func snapshot(server: CoursePathServer, token: String, today: String) async throws -> CoursePathSnapshot {
         reads += 1
         if let error { throw error }
@@ -48,9 +51,15 @@ private final class MemoryCredentials: CoursePathCredentialStorage {
     }
     func complete(server: CoursePathServer, token: String, taskId: String, completed: Bool, revision: Int) async throws -> CoursePathCompletion {
         writes.append((taskId, completed, revision))
+        if holdMutation { await withCheckedContinuation { heldMutation = $0 } }
         if let mutationError { throw mutationError }
-        result = sample(revision + 1, completed: completed)
-        return CoursePathCompletion(revision: result.revision, taskId: taskId, completed: completed, completedAt: completed ? "2026-10-09T12:00:00.000Z" : nil, assignmentId: "a", assignmentCompleted: completed)
+        let tasks = result.tasks.map { task in
+            task.id == taskId ? CoursePathTask(id: task.id, assignmentId: task.assignmentId, title: task.title, firstStep: task.firstStep,
+                date: task.date, minutes: task.minutes, order: task.order, completed: completed,
+                completedAt: completed ? "2026-10-09T12:00:00.000Z" : nil) : task
+        }
+        result = CoursePathSnapshot(revision: revision + 1, assignments: result.assignments, tasks: tasks, deadlines: result.deadlines, upcomingDeadlines: result.upcomingDeadlines)
+        return CoursePathCompletion(revision: result.revision, taskId: taskId, completed: completed, completedAt: completed ? "2026-10-09T12:00:00.000Z" : nil, assignmentId: "a", assignmentCompleted: tasks.allSatisfy(\.completed))
     }
 }
 
@@ -60,11 +69,11 @@ final class CoursePathConnectionTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [MockURLProtocol.self]
         return CoursePathAPIClient(session: URLSession(configuration: config))
     }
-    private func store(_ api: MockAPI, credentials: MemoryCredentials = MemoryCredentials(), pollInterval: TimeInterval = 20) -> CoursePathStore {
+    private func store(_ api: MockAPI, credentials: MemoryCredentials = MemoryCredentials(), pollInterval: TimeInterval = 20, now: @escaping () -> Date = { Date(timeIntervalSince1970: 1791547200) }) -> CoursePathStore {
         let name = "dev.coursepath.notch.tests." + UUID().uuidString
         let preferences = UserDefaults(suiteName: name)!
         addTeardownBlock { preferences.removePersistentDomain(forName: name) }
-        return CoursePathStore(api: api, credentials: credentials, preferences: preferences, now: { Date(timeIntervalSince1970: 1791547200) }, pollInterval: pollInterval)
+        return CoursePathStore(api: api, credentials: credentials, preferences: preferences, now: now, pollInterval: pollInterval)
     }
     func testSnapshotRequestAndDecoding() async throws {
         MockURLProtocol.handler = { request in
@@ -133,8 +142,9 @@ final class CoursePathConnectionTests: XCTestCase {
     }
     func testCompletionConflictRestorationAndNoOptimisticFailures() async {
         let api = MockAPI(), store = store(api); _ = await store.connect(testToken)
-        let complete = await store.setTaskCompletion("first", completed: true); XCTAssertTrue(complete); XCTAssertTrue(store.snapshot!.tasks[0].completed)
-        let restored = await store.setTaskCompletion("first", completed: false); XCTAssertTrue(restored); XCTAssertFalse(store.snapshot!.tasks[0].completed)
+        let complete = await store.setTaskCompletion("first", completed: true); XCTAssertTrue(complete); XCTAssertTrue(store.snapshot!.tasks.first(where: { $0.id == "first" })!.completed)
+        XCTAssertFalse(store.snapshot!.tasks.first(where: { $0.id == "second" })!.completed)
+        let restored = await store.setTaskCompletion("first", completed: false); XCTAssertTrue(restored); XCTAssertFalse(store.snapshot!.tasks.first(where: { $0.id == "first" })!.completed)
         XCTAssertEqual(api.writes.map { $0.1 }, [true, false]); XCTAssertEqual(api.writes.map { $0.2 }, [4, 5])
         api.mutationError = .conflict; api.result = sample(9, completed: true)
         let conflict = await store.setTaskCompletion("first", completed: true); XCTAssertFalse(conflict); XCTAssertEqual(store.snapshot?.revision, 9); XCTAssertEqual(api.writes.count, 3)
@@ -161,6 +171,65 @@ final class CoursePathConnectionTests: XCTestCase {
         store.setContentVisible(false, source: source); let count = api.reads
         try await Task.sleep(nanoseconds: 80_000_000); XCTAssertEqual(api.reads, count)
         api.result = sample(1); let older = await store.refresh(); XCTAssertFalse(older); XCTAssertEqual(store.snapshot?.revision, 4)
+    }
+    func testStaleReopeningTabSwitchesAndWakeShareThrottle() async throws {
+        let api = MockAPI()
+        var clock = Date(timeIntervalSince1970: 1791547200)
+        let store = store(api, now: { clock })
+        _ = await store.connect(testToken)
+        let home = UUID(), weekly = UUID()
+        store.setContentVisible(true, source: home)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 1) // Fresh connect is reused.
+        store.setContentVisible(false, source: home)
+        clock.addTimeInterval(6)
+        api.result = sample(5, completed: true)
+        store.setContentVisible(true, source: home)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 2)
+        XCTAssertEqual(store.snapshot?.revision, 5)
+        XCTAssertTrue(store.tasks(on: "2026-10-09").allSatisfy(\.completed))
+        for _ in 0..<5 {
+            store.setContentVisible(true, source: weekly)
+            store.setContentVisible(false, source: home)
+            store.setContentVisible(true, source: home)
+            store.setContentVisible(false, source: weekly)
+        }
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 2)
+        clock.addTimeInterval(6)
+        api.result = sample(6) // External restoration while the Mac slept.
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 3)
+        XCTAssertFalse(store.tasks(on: "2026-10-09")[0].completed)
+        store.setContentVisible(false, source: home)
+        clock.addTimeInterval(60)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 3) // Closed wake does not fetch.
+    }
+    func testLifecycleFailuresAreThrottledAndConcurrentReadsAreSkipped() async throws {
+        let api = MockAPI()
+        var clock = Date(timeIntervalSince1970: 1791547200)
+        let store = store(api, now: { clock })
+        _ = await store.connect(testToken)
+        let source = UUID(), second = UUID()
+        clock.addTimeInterval(6); api.error = .offline
+        store.setContentVisible(true, source: source)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 2); XCTAssertEqual(store.status, .offline)
+        for _ in 0..<5 { _ = await store.refreshVisibleContent() }
+        XCTAssertEqual(api.reads, 2); XCTAssertEqual(store.snapshot?.revision, 4)
+        clock.addTimeInterval(6); api.error = nil; api.hold = true
+        let read = Task { await store.refreshVisibleContent() }
+        while api.held == nil { await Task.yield() }
+        store.setContentVisible(true, source: second)
+        let duplicate = await store.refreshVisibleContent()
+        XCTAssertFalse(duplicate); XCTAssertEqual(api.reads, 3)
+        api.held?.resume(returning: sample(7)); _ = await read.value
+        store.setContentVisible(false, source: source); store.setContentVisible(false, source: second)
+        XCTAssertEqual(store.snapshot?.revision, 7)
     }
     func testRealKeychainLifecycle() throws {
         // Isolated temporary service, never the user's actual CoursePath credential.
@@ -198,5 +267,75 @@ final class CoursePathConnectionTests: XCTestCase {
         _ = await store.refresh()
         XCTAssertTrue(CoursePathCalendarAdapter.items(in: store.snapshot, on: "2026-10-09").isEmpty)
         XCTAssertEqual(CoursePathCalendarPlaceholder.resolve(hasSnapshot: store.snapshot != nil, hasCredential: store.hasCredential, isBusy: store.isBusy), .disconnected)
+    }
+    func testCompletionFinishesWhenLeavingTabWithoutDuplicateWrites() async {
+        let api = MockAPI(), store = store(api)
+        _ = await store.connect(testToken)
+        let source = UUID(); store.setContentVisible(true, source: source)
+        // A just-connected snapshot is fresh; opening must not duplicate that read.
+        await Task.yield()
+        while store.isBusy { await Task.yield() }
+        api.holdMutation = true
+        let mutation = Task { await store.setTaskCompletion("first", completed: true) }
+        while api.heldMutation == nil { await Task.yield() }
+        let duplicate = await store.setTaskCompletion("first", completed: true)
+        XCTAssertFalse(duplicate); XCTAssertEqual(api.writes.count, 1)
+        XCTAssertFalse(store.snapshot!.tasks.first(where: { $0.id == "first" })!.completed)
+        store.setContentVisible(false, source: source)
+        XCTAssertTrue(store.isBusy)
+        api.heldMutation?.resume()
+        let confirmed = await mutation.value
+        XCTAssertTrue(confirmed); XCTAssertEqual(store.status, .connected)
+        let data = CoursePathTabData(snapshot: store.snapshot, today: "2026-10-09")
+        XCTAssertEqual(data.progress, CoursePathTodayProgress(completed: 1, total: 2))
+        XCTAssertEqual(store.snapshot?.revision, 5)
+        XCTAssertEqual(api.writes.count, 1)
+    }
+    func testConfirmedWriteWithFailedRefreshKeepsCacheAndBlocksRepeatUntilRefresh() async {
+        let api = MockAPI(), store = store(api); _ = await store.connect(testToken)
+        api.error = .offline // The POST succeeds, but its following snapshot read fails.
+        let result = await store.setTaskCompletion("first", completed: true)
+        XCTAssertFalse(result); XCTAssertEqual(store.status, .offline)
+        XCTAssertEqual(store.snapshot?.revision, 4)
+        XCTAssertFalse(store.snapshot!.tasks.first(where: { $0.id == "first" })!.completed)
+        let repeatWrite = await store.setTaskCompletion("first", completed: true)
+        XCTAssertFalse(repeatWrite); XCTAssertEqual(api.writes.count, 1)
+        api.error = nil
+        let refreshed = await store.refresh()
+        XCTAssertTrue(refreshed); XCTAssertEqual(store.snapshot?.revision, 5)
+        XCTAssertTrue(store.snapshot!.tasks.first(where: { $0.id == "first" })!.completed)
+        XCTAssertEqual(api.writes.count, 1)
+    }
+    func testSharedHomeAndWeeklyCompletionAndRestorationUseOneAuthoritativeStore() async {
+        let api = MockAPI(), store = store(api); _ = await store.connect(testToken)
+        let controller = CoursePathCompletionController(store: store)
+        let confirmed = await controller.setCompletion("first", completed: true)
+        XCTAssertTrue(confirmed); XCTAssertNil(controller.notice)
+        let home = CoursePathCalendarAdapter.items(in: store.snapshot, on: "2026-10-09")
+        let weekly = CoursePathWeekData(snapshot: store.snapshot, selection: CoursePathWeekSelection(today: "2026-10-09"), today: "2026-10-09")
+        XCTAssertEqual(home.map(\.sourceID), ["second", "first"])
+        XCTAssertEqual(weekly.selectedTasks.map(\.sourceID), home.map(\.sourceID))
+        XCTAssertEqual(weekly.progress.completed, 1); XCTAssertEqual(store.tasks(on: "2026-10-09").map(\.id), ["second", "first"])
+        let restored = await controller.setCompletion("first", completed: false)
+        XCTAssertTrue(restored); XCTAssertEqual(store.tasks(on: "2026-10-09").map(\.id), ["first", "second"])
+        XCTAssertEqual(api.writes.map { $0.2 }, [4, 5]); XCTAssertEqual(api.writes.count, 2)
+    }
+    func testSharedCompletionFailureConflictAndExternalChanges() async {
+        let api = MockAPI(), store = store(api); _ = await store.connect(testToken)
+        let controller = CoursePathCompletionController(store: store)
+        api.mutationError = .offline
+        let failed = await controller.setCompletion("first", completed: true)
+        XCTAssertFalse(failed); XCTAssertNotNil(controller.notice); XCTAssertFalse(controller.canUpdate)
+        XCTAssertTrue(store.snapshot!.tasks.allSatisfy { !$0.completed })
+        _ = await controller.setCompletion("first", completed: true); XCTAssertEqual(api.writes.count, 1)
+        api.mutationError = nil; _ = await store.refresh()
+        api.mutationError = .conflict; api.result = sample(9, completed: true)
+        let conflicted = await controller.setCompletion("first", completed: true)
+        XCTAssertFalse(conflicted); XCTAssertEqual(store.snapshot?.revision, 9)
+        XCTAssertTrue(controller.notice?.contains("Calendar changed") == true); XCTAssertEqual(api.writes.count, 2)
+        api.mutationError = nil; api.result = sample(10)
+        _ = await store.refresh()
+        let data = CoursePathWeekData(snapshot: store.snapshot, selection: CoursePathWeekSelection(today: "2026-10-09"), today: "2026-10-09")
+        XCTAssertEqual(data.progress.completed, 0); XCTAssertEqual(data.selectedTasks.map(\.sourceID), ["first", "second"])
     }
 }

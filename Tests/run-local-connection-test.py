@@ -1,19 +1,16 @@
-"""Run a sandboxed native probe against an isolated CoursePath backend (port 5173).
+"""Run a sandboxed native probe against an isolated backend on an ephemeral loopback port.
 No real Clerk identities, account data, provider keys, or persistent tokens are used.
 """
 import json
 import os
 from pathlib import Path
 import plistlib
-import socket
 import subprocess
 import tempfile
 import uuid
 
 notch = Path(__file__).resolve().parent.parent
 app = notch.parent / "CoursePath App"
-with socket.socket() as check:
-    check.bind(("127.0.0.1", 5173))  # Fail before launching anything if a real server owns this port.
 with tempfile.TemporaryDirectory(prefix="coursepath-native-e2e-") as temporary:
     root = Path(temporary)
     bundle = root / "ConnectionProbe.app"
@@ -23,16 +20,23 @@ with tempfile.TemporaryDirectory(prefix="coursepath-native-e2e-") as temporary:
             "CFBundlePackageType": "APPL", "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True}}
     with (bundle / "Contents/Info.plist").open("wb") as file:
         plistlib.dump(info, file)
-    sources = [notch / "boringNotch/CoursePath" / file for file in
-               ["CoursePathModels.swift", "CoursePathAPI.swift", "CoursePathKeychain.swift", "CoursePathStore.swift"]]
-    subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-target", os.uname().machine + "-apple-macosx14.0",
-                    *map(str, sources), str(notch / "Tests/LocalConnectionProbe.swift"), "-o", str(executable)], check=True)
-    subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(notch / "boringNotch/boringNotch.entitlements"), str(bundle)], check=True, capture_output=True)
     backend = subprocess.Popen(["node", str(notch / "Tests/local-backend-fixture.mjs"), str(app), str(root / "database")],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     service = "dev.coursepath.notch.e2e." + str(uuid.uuid4())
+    test_url = None
     try:
         credential = json.loads(backend.stdout.readline())
+        test_url = "http://127.0.0.1:" + str(credential.pop("port"))
+        # Only this disposable probe substitutes the local preset's port. The shipped
+        # application's fixed URL presets and security policy remain unchanged.
+        models = root / "CoursePathModels.swift"
+        models.write_text((notch / "boringNotch/CoursePath/CoursePathModels.swift").read_text().replace(
+            '"http://127.0.0.1:5173"', '"' + test_url + '"'))
+        sources = [models] + [notch / "boringNotch/CoursePath" / file for file in
+                   ["CoursePathAPI.swift", "CoursePathKeychain.swift", "CoursePathStore.swift", "CoursePathTaskPresentation.swift"]]
+        subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-target", os.uname().machine + "-apple-macosx14.0",
+                        *map(str, sources), str(notch / "Tests/LocalConnectionProbe.swift"), "-o", str(executable)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(notch / "boringNotch/boringNotch.entitlements"), str(bundle)], check=True, capture_output=True)
         result = subprocess.run([str(executable)], input=json.dumps({"token": credential.pop("token"), "service": service}),
                                 capture_output=True, text=True, timeout=30)
         print(result.stdout.strip())  # The probe emits only fixed PASS/FAIL metadata.
@@ -44,4 +48,5 @@ with tempfile.TemporaryDirectory(prefix="coursepath-native-e2e-") as temporary:
             backend.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             backend.kill(); backend.communicate()
-        subprocess.run(["security", "delete-generic-password", "-s", service, "-a", "http://127.0.0.1:5173"], capture_output=True)
+        if test_url:
+            subprocess.run(["security", "delete-generic-password", "-s", service, "-a", test_url], capture_output=True)

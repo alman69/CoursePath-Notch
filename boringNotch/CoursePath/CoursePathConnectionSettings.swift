@@ -41,10 +41,9 @@ struct CoursePathConnectionSettings: View {
                     if store.isCached { Text("Showing cached data. Refresh before updating progress.").font(.caption).foregroundStyle(.secondary) }
                 }
             }
+            .settingsSearchSection("coursepath.connection")
             Section {
                 Text("Generate a desktop token in CoursePath Settings → CoursePath Notch. Credentials stay in this Mac’s Keychain. Each server uses its own credential.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("Calendar and task views will be connected in a later phase.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

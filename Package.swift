@@ -7,7 +7,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.library(name: "CoursePathConnection", targets: ["CoursePathConnection"])],
     targets: [
-        .target(name: "CoursePathConnection", path: "boringNotch/CoursePath", exclude: ["CoursePathConnectionSettings.swift", "CoursePathCalendarView.swift", ".gitkeep"]),
+        .target(name: "CoursePathConnection", path: "boringNotch/CoursePath", exclude: ["CoursePathConnectionSettings.swift", "CoursePathCalendarView.swift", "CoursePathTabView.swift", "CoursePathStudyRow.swift", "SettingsSearchUI.swift", ".gitkeep"]),
         .testTarget(name: "CoursePathConnectionTests", dependencies: ["CoursePathConnection"], path: "Tests/CoursePathConnectionTests")
     ]
 )

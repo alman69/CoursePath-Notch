@@ -277,6 +277,8 @@ struct CalendarEntryRow<Trailing: View>: View {
     let color: Color
     let showFullTitle: Bool
     let completed: Bool
+    let subtitleIcon: String?
+    let strikethrough: Bool
     let trailing: Trailing
 
     private var titleText: some View {
@@ -285,11 +287,13 @@ struct CalendarEntryRow<Trailing: View>: View {
             .fontWeight(.medium)
             .foregroundColor(.white)
             .lineLimit(showFullTitle ? nil : 2)
+            .strikethrough(strikethrough, color: .gray)
     }
 
-    init(title: String, subtitle: String?, color: Color, showFullTitle: Bool, completed: Bool = false, @ViewBuilder trailing: () -> Trailing) {
+    init(title: String, subtitle: String?, color: Color, showFullTitle: Bool, completed: Bool = false, subtitleIcon: String? = nil, strikethrough: Bool = false, @ViewBuilder trailing: () -> Trailing) {
         self.title = title; self.subtitle = subtitle; self.color = color
         self.showFullTitle = showFullTitle; self.completed = completed; self.trailing = trailing()
+        self.subtitleIcon = subtitleIcon; self.strikethrough = strikethrough
     }
 
     var body: some View {
@@ -308,10 +312,11 @@ struct CalendarEntryRow<Trailing: View>: View {
                     titleText
                 }
                 if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundColor(Color(white: 0.65))
-                        .lineLimit(1)
+                    HStack(spacing: 3) {
+                        if let subtitleIcon { Image(systemName: subtitleIcon).font(.caption2) }
+                        Text(subtitle).lineLimit(1)
+                    }
+                    .font(.caption).foregroundColor(Color(white: 0.65))
                 }
             }
             Spacer(minLength: 0)

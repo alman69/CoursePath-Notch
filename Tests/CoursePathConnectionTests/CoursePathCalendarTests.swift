@@ -30,8 +30,8 @@ final class CoursePathCalendarTests: XCTestCase {
     func testTaskOrderingAndCompletionArePreserved() {
         let data = snapshot(tasks: [task("last", order: 3), task("b", order: 0.5), task("a", order: 0.5, completed: true)])
         let rows = CoursePathCalendarAdapter.items(in: data, on: day)
-        XCTAssertEqual(rows.map(\.id), ["study:a", "study:b", "study:last"])
-        XCTAssertTrue(rows[0].completed); XCTAssertFalse(rows[1].completed)
+        XCTAssertEqual(rows.map(\.id), ["study:b", "study:last", "study:a"])
+        XCTAssertTrue(rows[2].completed); XCTAssertFalse(rows[0].completed)
         XCTAssertEqual(rows[0].colorHue, 210)
     }
     func testLinkedDeadlinesAreFilteredDeduplicatedAndChronological() {

@@ -3,6 +3,7 @@ import Foundation
 struct CoursePathCalendarItem: Identifiable, Equatable {
     enum Kind { case study, deadline }
     let id: String
+    let sourceID: String
     let kind: Kind
     let title: String
     let subtitle: String?
@@ -17,15 +18,13 @@ enum CoursePathCalendarAdapter {
     static func items(in snapshot: CoursePathSnapshot?, on day: String) -> [CoursePathCalendarItem] {
         guard let snapshot else { return [] }
         let assignments = Dictionary(snapshot.assignments.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let tasks = snapshot.tasks.filter { $0.date == day }.sorted {
-            $0.order == $1.order ? $0.id < $1.id : $0.order < $1.order
-        }.map { task in
+        let tasks = CoursePathTaskPresentation.sorted(snapshot.tasks.filter { $0.date == day }).map { task in
             let assignment = assignments[task.assignmentId]
             let context = [assignment?.course, assignment?.title == task.title ? nil : assignment?.title]
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             let duration = task.minutes.isFinite && task.minutes > 0
                 ? [task.minutes.formatted(.number.precision(.fractionLength(0...2))) + " min"] : []
-            return CoursePathCalendarItem(id: "study:" + task.id, kind: .study, title: task.title,
+            return CoursePathCalendarItem(id: "study:" + task.id, sourceID: task.id, kind: .study, title: task.title,
                 subtitle: context.isEmpty ? nil : context, details: duration,
                 colorHue: assignment?.colorHue, completed: task.completed)
         }
@@ -36,12 +35,14 @@ enum CoursePathCalendarAdapter {
             let right = $1.dueTime.isEmpty ? "~" : $1.dueTime
             return left == right ? $0.id < $1.id : left < right
         }.map { deadline in
-            CoursePathCalendarItem(id: "deadline:" + deadline.id, kind: .deadline, title: deadline.title,
+            CoursePathCalendarItem(id: "deadline:" + deadline.id, sourceID: deadline.id, kind: .deadline, title: deadline.title,
                 subtitle: deadline.course.isEmpty ? nil : deadline.course,
                 details: CoursePathDeadlineTime.display(deadline.dueTime).map { ["Due", $0] } ?? ["Due"],
                 colorHue: deadline.colorHue, completed: deadline.completed)
         }
-        return tasks + deadlines
+        // Keep active deadlines ahead of completed work without altering server order.
+        return tasks.filter { !$0.completed } + deadlines.filter { !$0.completed }
+            + tasks.filter(\.completed) + deadlines.filter(\.completed)
     }
 }
 
