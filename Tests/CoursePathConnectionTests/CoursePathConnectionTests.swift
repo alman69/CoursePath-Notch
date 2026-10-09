@@ -172,4 +172,31 @@ final class CoursePathConnectionTests: XCTestCase {
         try keychain.save(testToken + "replacement", server: .local); XCTAssertEqual(try keychain.read(server: .local), testToken + "replacement")
         try keychain.delete(server: .local); try keychain.delete(server: .local); XCTAssertNil(try keychain.read(server: .local))
     }
+    func testHomeAndSettingsSharePollingAndKeepOfflineRows() async throws {
+        let api = MockAPI(), store = store(api, pollInterval: 0.03)
+        _ = await store.connect(testToken)
+        let home = UUID(), settings = UUID()
+        store.setContentVisible(true, source: home)
+        try await Task.sleep(nanoseconds: 10_000_000)
+        let initialReads = api.reads
+        store.setContentVisible(true, source: home)
+        store.setContentVisible(true, source: settings)
+        try await Task.sleep(nanoseconds: 5_000_000)
+        XCTAssertEqual(api.reads, initialReads)
+        store.setContentVisible(false, source: home)
+        try await Task.sleep(nanoseconds: 70_000_000)
+        XCTAssertGreaterThan(api.reads, initialReads)
+        api.error = .offline
+        _ = await store.refresh()
+        XCTAssertEqual(store.status, .offline)
+        XCTAssertEqual(CoursePathCalendarAdapter.items(in: store.snapshot, on: "2026-10-09").map(\.id), ["study:first", "study:second"])
+        store.setContentVisible(false, source: settings)
+        let finalReads = api.reads
+        try await Task.sleep(nanoseconds: 70_000_000)
+        XCTAssertEqual(api.reads, finalReads)
+        api.error = .unauthorized
+        _ = await store.refresh()
+        XCTAssertTrue(CoursePathCalendarAdapter.items(in: store.snapshot, on: "2026-10-09").isEmpty)
+        XCTAssertEqual(CoursePathCalendarPlaceholder.resolve(hasSnapshot: store.snapshot != nil, hasCredential: store.hasCredential, isBusy: store.isBusy), .disconnected)
+    }
 }

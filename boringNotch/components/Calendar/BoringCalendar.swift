@@ -178,6 +178,40 @@ struct WheelPicker: View {
     }
 }
 
+struct CalendarDateHeader: View {
+    @Binding var selectedDate: Date
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading) {
+                Text(selectedDate.formatted(.dateTime.month(.abbreviated)))
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                Text(selectedDate.formatted(.dateTime.year()))
+                    .font(.title3)
+                    .fontWeight(.light)
+                    .foregroundColor(Color(white: 0.65))
+            }
+
+            ZStack(alignment: .top) {
+                WheelPicker(selectedDate: $selectedDate, config: Config())
+                HStack(alignment: .top) {
+                    LinearGradient(
+                        colors: [Color.black, .clear], startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: 20)
+                    Spacer()
+                    LinearGradient(
+                        colors: [.clear, Color.black], startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: 20)
+                }
+            }
+        }
+    }
+}
+
 struct CalendarView: View {
     @EnvironmentObject var vm: BoringViewModel
     @ObservedObject private var calendarManager = CalendarManager.shared
@@ -185,33 +219,7 @@ struct CalendarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading) {
-                    Text(selectedDate.formatted(.dateTime.month(.abbreviated)))
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.white)
-                    Text(selectedDate.formatted(.dateTime.year()))
-                        .font(.title3)
-                        .fontWeight(.light)
-                        .foregroundColor(Color(white: 0.65))
-                }
-
-                ZStack(alignment: .top) {
-                    WheelPicker(selectedDate: $selectedDate, config: Config())
-                    HStack(alignment: .top) {
-                        LinearGradient(
-                            colors: [Color.black, .clear], startPoint: .leading, endPoint: .trailing
-                        )
-                        .frame(width: 20)
-                        Spacer()
-                        LinearGradient(
-                            colors: [.clear, Color.black], startPoint: .leading, endPoint: .trailing
-                        )
-                        .frame(width: 20)
-                    }
-                }
-            }
+            CalendarDateHeader(selectedDate: $selectedDate)
 
             let filteredEvents = EventListView.filteredEvents(
                 events: calendarManager.events
@@ -259,6 +267,55 @@ struct EmptyEventsView: View {
             Text("Enjoy your free time!")
                 .font(.caption)
                 .foregroundColor(Color(white: 0.65))
+        }
+    }
+}
+
+struct CalendarEntryRow<Trailing: View>: View {
+    let title: String
+    let subtitle: String?
+    let color: Color
+    let showFullTitle: Bool
+    let completed: Bool
+    let trailing: Trailing
+
+    private var titleText: some View {
+        Text(title)
+            .font(.callout)
+            .fontWeight(.medium)
+            .foregroundColor(.white)
+            .lineLimit(showFullTitle ? nil : 2)
+    }
+
+    init(title: String, subtitle: String?, color: Color, showFullTitle: Bool, completed: Bool = false, @ViewBuilder trailing: () -> Trailing) {
+        self.title = title; self.subtitle = subtitle; self.color = color
+        self.showFullTitle = showFullTitle; self.completed = completed; self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 4) {
+            Rectangle()
+                .fill(color)
+                .frame(width: 3)
+                .cornerRadius(1.5)
+            VStack(alignment: .leading, spacing: 2) {
+                if completed {
+                    HStack(spacing: 4) {
+                        titleText
+                        Image(systemName: "checkmark").font(.caption2).foregroundColor(Color(white: 0.65))
+                    }
+                } else {
+                    titleText
+                }
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundColor(Color(white: 0.65))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            trailing
         }
     }
 }
@@ -396,27 +453,8 @@ struct EventListView: View {
             )
         } else {
             return AnyView(
-                HStack(alignment: .top, spacing: 4) {
-                    Rectangle()
-                        .fill(Color(event.calendar.color))
-                        .frame(width: 3)
-                        .cornerRadius(1.5)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(event.title)
-                            .font(.callout)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                            .lineLimit(showFullEventTitles ? nil : 2)
-
-                        if let location = event.location, !location.isEmpty {
-                            Text(location)
-                                .font(.caption)
-                                .foregroundColor(Color(white: 0.65))
-                                .lineLimit(1)
-                        }
-                    }
-                    Spacer(minLength: 0)
+                CalendarEntryRow(title: event.title, subtitle: event.location,
+                    color: Color(event.calendar.color), showFullTitle: showFullEventTitles) {
                     VStack(alignment: .trailing, spacing: 4) {
                         if event.isAllDay {
                             Text("All-day")

@@ -110,6 +110,9 @@ struct SettingsView: View {
         .frame(width: 700)
         .background(Color(NSColor.windowBackgroundColor))
         .tint(.effectiveAccent)
+        .onReceive(NotificationCenter.default.publisher(for: .coursePathConnectionSettings)) { _ in
+            selectedTab = "CoursePath"
+        }
         .id(accentColorUpdateTrigger)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AccentColorChanged"))) { _ in
             accentColorUpdateTrigger = UUID()

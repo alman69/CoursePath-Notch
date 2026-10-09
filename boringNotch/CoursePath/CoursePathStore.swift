@@ -110,8 +110,11 @@ final class CoursePathStore: ObservableObject {
         (snapshot?.tasks ?? []).filter { $0.date == day }.sorted { $0.order == $1.order ? $0.id < $1.id : $0.order < $1.order }
     }
     func setContentVisible(_ visible: Bool, source: UUID) {
-        if visible { visibleSources.insert(source) } else { visibleSources.remove(source) }
-        restartPolling()
+        let changed = visible ? visibleSources.insert(source).inserted : visibleSources.remove(source) != nil
+        guard changed else { return }
+        // Home, Settings and multiple notch displays share one loop. Adding another
+        // visible surface must not reset the timer or launch another immediate read.
+        if visibleSources.isEmpty || pollingTask == nil { restartPolling() }
     }
     private func restartPolling() {
         pollingTask?.cancel(); pollingTask = nil
