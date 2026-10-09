@@ -84,6 +84,9 @@ struct CoursePathCalendarView: View {
         .onAppear { selectedDate = .now; updateVisibility() }
         .onChange(of: vm.notchState) { _, _ in selectedDate = .now; updateVisibility() }
         .onChange(of: coordinator.currentView) { _, _ in updateVisibility() }
+        .onChange(of: store.currentDay) { previous, current in
+            if CoursePathDate.key(selectedDate) == previous, let date = CoursePathDate.date(current) { selectedDate = date }
+        }
         .onChange(of: store.server) { _, _ in completion.clearNotice() }
         .onChange(of: store.hasCredential) { _, credential in if !credential { completion.clearNotice() } }
         .onDisappear { store.setContentVisible(false, source: visibilityID) }

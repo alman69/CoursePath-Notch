@@ -55,7 +55,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenLockedObserver: Any?
     private var screenUnlockedObserver: Any?
     private var isScreenLocked: Bool = false
-    private var windowScreenDidChangeObserver: Any?
+    private var windowScreenDidChangeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
     private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -139,20 +139,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         if shouldCleanupMulti {
             windows.values.forEach { window in
-                window.close()
-                NotchSpaceManager.shared.notchSpace.windows.remove(window)
+                closeNotchWindow(window)
             }
             windows.removeAll()
             viewModels.removeAll()
         } else if let window = window {
-            window.close()
-            NotchSpaceManager.shared.notchSpace.windows.remove(window)
-            if let obs = windowScreenDidChangeObserver {
-                NotificationCenter.default.removeObserver(obs)
-                windowScreenDidChangeObserver = nil
-            }
+            closeNotchWindow(window)
             self.window = nil
         }
+    }
+
+    private func closeNotchWindow(_ window: NSWindow) {
+        if let observer = windowScreenDidChangeObservers.removeValue(forKey: ObjectIdentifier(window)) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        window.close()
+        NotchSpaceManager.shared.notchSpace.windows.remove(window)
     }
 
     private func cleanupDragDetectors() {
@@ -243,7 +245,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotchSpaceManager.shared.notchSpace.windows.insert(window)
 
         // Observe when the window's screen changes so we can update drag detectors
-        windowScreenDidChangeObserver = NotificationCenter.default.addObserver(
+        windowScreenDidChangeObservers[ObjectIdentifier(window)] = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeScreenNotification,
             object: window,
             queue: .main) { [weak self] _ in
@@ -471,8 +473,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Remove windows for screens that no longer exist
             for uuid in windows.keys where !currentScreenUUIDs.contains(uuid) {
                 if let window = windows[uuid] {
-                    window.close()
-                    NotchSpaceManager.shared.notchSpace.windows.remove(window)
+                    closeNotchWindow(window)
                     windows.removeValue(forKey: uuid)
                     viewModels.removeValue(forKey: uuid)
                 }

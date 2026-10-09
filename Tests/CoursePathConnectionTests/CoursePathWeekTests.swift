@@ -23,6 +23,21 @@ final class CoursePathWeekTests: XCTestCase {
         XCTAssertEqual(Set(spring.days).count, 7)
         XCTAssertEqual(CoursePathWeekSelection(today: "2026-11-01").days.last, "2026-11-01")
     }
+    func testMidnightFollowsTodayAcrossWeekBoundaryButKeepsBrowsedDates() {
+        var current = CoursePathWeekSelection(today: "2026-10-11")
+        current.toggleExpanded()
+        current.advanceToday(from: "2026-10-11", to: "2026-10-12")
+        XCTAssertEqual(current.selectedDay, "2026-10-12"); XCTAssertEqual(current.days.first, "2026-10-12")
+        XCTAssertTrue(current.isExpanded)
+        current.select("2026-10-14")
+        let browsed = current
+        current.advanceToday(from: "2026-10-12", to: "2026-10-13")
+        XCTAssertEqual(current, browsed)
+        current.moveWeek(-1)
+        let olderWeek = current
+        current.advanceToday(from: "2026-10-13", to: "2026-10-14")
+        XCTAssertEqual(current, olderWeek)
+    }
     func testDailyBreakdownStartsCollapsedSelectsAndCollapsesOnWeekNavigation() {
         var week = CoursePathWeekSelection(today: "2026-10-09")
         XCTAssertFalse(week.isExpanded)

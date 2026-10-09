@@ -16,6 +16,12 @@ struct CoursePathWeekSelection: Equatable {
         days = (0..<7).map { CoursePathDate.key(Self.calendar.date(byAdding: .day, value: $0, to: monday)!) }
         selectedDay = CoursePathDate.key(date)
     }
+    mutating func advanceToday(from previous: String, to current: String) {
+        guard previous != current, selectedDay == previous else { return }
+        let expanded = isExpanded
+        self = Self(today: current)
+        isExpanded = expanded
+    }
     mutating func moveWeek(_ delta: Int) {
         let index = days.firstIndex(of: selectedDay) ?? 0
         guard let date = CoursePathDate.date(days[0]), let shifted = Self.calendar.date(byAdding: .day, value: delta * 7, to: date) else { return }

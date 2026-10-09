@@ -13,6 +13,7 @@ final class CoursePathStore: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var hasCredential = false
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var currentDay: String
     var isCached: Bool { snapshot != nil && status != .connected }
     var upcomingDeadlines: [CoursePathDeadline] { snapshot?.upcomingDeadlines ?? [] }
     private let api: CoursePathAPI
@@ -25,23 +26,54 @@ final class CoursePathStore: ObservableObject {
     private var requestTask: Task<CoursePathSnapshot, Error>?
     private var isMutationInFlight = false
     private var pollingTask: Task<Void, Never>?
+    var hasActivePolling: Bool { pollingTask != nil }
     private var visibleSources = Set<UUID>()
     private var lastRequestStarted: Date?
     private let visibilityRefreshInterval: TimeInterval = 5
     private let workspaceNotifications = NSWorkspace.shared.notificationCenter
-    private var wakeObserver: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var dayObservers: [NSObjectProtocol] = []
+    private var isAsleep = false
+    private var lastSnapshotDay: String?
 
     init(api: CoursePathAPI = CoursePathAPIClient(), credentials: CoursePathCredentialStorage = CoursePathKeychain(), preferences: UserDefaults = .standard, now: @escaping () -> Date = Date.init, pollInterval: TimeInterval = 20) {
         self.api = api; self.credentials = credentials; self.preferences = preferences; self.now = now; self.pollInterval = pollInterval
+        currentDay = CoursePathDate.key(now())
         server = CoursePathServer(rawValue: preferences.string(forKey: "CoursePath.server") ?? "") ?? .local
         restoreCredential()
-        wakeObserver = workspaceNotifications.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in await self?.refreshVisibleContent() }
+        workspaceObservers.append(workspaceNotifications.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.handleSleep() }
+        })
+        workspaceObservers.append(workspaceNotifications.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.handleWake() }
+        })
+        for name in [Notification.Name.NSCalendarDayChanged, .NSSystemTimeZoneDidChange] {
+            dayObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.updateCurrentDay()
+                    await self?.refreshVisibleContent()
+                }
+            })
         }
     }
     deinit {
-        if let wakeObserver { workspaceNotifications.removeObserver(wakeObserver) }
+        workspaceObservers.forEach(workspaceNotifications.removeObserver)
+        dayObservers.forEach(NotificationCenter.default.removeObserver)
         pollingTask?.cancel()
+        requestTask?.cancel()
+    }
+    private func updateCurrentDay() {
+        let day = CoursePathDate.key(now())
+        if day != currentDay { currentDay = day }
+    }
+    private func handleSleep() {
+        isAsleep = true
+        restartPolling()
+    }
+    private func handleWake() {
+        isAsleep = false
+        updateCurrentDay()
+        restartPolling()
     }
     private func restoreCredential() {
         do {
@@ -52,7 +84,7 @@ final class CoursePathStore: ObservableObject {
     }
     func selectServer(_ server: CoursePathServer) {
         guard server != self.server else { return }
-        cancelRequests(); token = nil; hasCredential = false; snapshot = nil; lastUpdated = nil; lastRequestStarted = nil
+        cancelRequests(); token = nil; hasCredential = false; snapshot = nil; lastUpdated = nil; lastRequestStarted = nil; lastSnapshotDay = nil
         self.server = server; preferences.set(server.rawValue, forKey: "CoursePath.server")
         restoreCredential(); restartPolling()
     }
@@ -77,7 +109,8 @@ final class CoursePathStore: ObservableObject {
     }
     // In-memory, authoritative data only; no speculative completion toggles or calendar disk cache.
     private func perform(candidate: String, mutation: (String, Bool, Int)? = nil) async -> Bool {
-        let version = generation, server = server, today = CoursePathDate.key(now()), api = api
+        updateCurrentDay()
+        let version = generation, server = server, today = currentDay, api = api
         lastRequestStarted = now()
         isBusy = true; isMutationInFlight = mutation != nil; status = .connecting; message = "Connecting…"
         var conflicted = false
@@ -91,19 +124,27 @@ final class CoursePathStore: ObservableObject {
             return try await api.snapshot(server: server, token: candidate, today: today)
         }
         requestTask = request
-        defer { if generation == version { isBusy = false; isMutationInFlight = false; requestTask = nil } }
+        defer {
+            if generation == version {
+                isBusy = false; isMutationInFlight = false; requestTask = nil
+                if pollingTask == nil && hasCredential && !visibleSources.isEmpty && !isAsleep { restartPolling() }
+            }
+        }
         do {
             let result = try await request.value
             guard generation == version, !request.isCancelled else { return false }
             guard result.revision >= (self.snapshot?.revision ?? 0) else { throw CoursePathError.invalidResponse }
             if token != candidate || !hasCredential { try credentials.save(candidate, server: server) }
-            token = candidate; hasCredential = true; self.snapshot = result; lastUpdated = now(); status = .connected
+            token = candidate; hasCredential = true; self.snapshot = result; lastUpdated = now(); lastSnapshotDay = today; status = .connected
+            updateCurrentDay()
+            if today != currentDay { Task { [weak self] in await self?.refreshVisibleContent() } }
             message = conflicted ? "The calendar changed. Latest progress loaded; review before trying again." : "Connected."
             return !conflicted
         } catch {
             guard generation == version, !request.isCancelled else { return false }
             if error as? CoursePathError == .unauthorized {
-                token = nil; hasCredential = false; self.snapshot = nil; lastUpdated = nil; status = .expired
+                token = nil; hasCredential = false; self.snapshot = nil; lastUpdated = nil; lastSnapshotDay = nil; status = .expired
+                pollingTask?.cancel(); pollingTask = nil
                 do { try credentials.delete(server: server) }
                 catch { message = "Access expired. Disconnect to remove the stored credential."; return false }
             } else { status = hasCredential ? .offline : .failed }
@@ -113,9 +154,10 @@ final class CoursePathStore: ObservableObject {
         }
     }
     func disconnect() {
-        cancelRequests(); token = nil; hasCredential = false; snapshot = nil; lastUpdated = nil; lastRequestStarted = nil
+        cancelRequests(); token = nil; hasCredential = false; snapshot = nil; lastUpdated = nil; lastRequestStarted = nil; lastSnapshotDay = nil
         do { try credentials.delete(server: server); status = .disconnected; message = "Disconnected. Revoke the device in CoursePath Settings to also remove server access." }
         catch { status = .failed; message = error.localizedDescription }
+        restartPolling()
     }
     private func cancelRequests() {
         generation = UUID(); requestTask?.cancel(); requestTask = nil; isBusy = false; isMutationInFlight = false
@@ -124,6 +166,7 @@ final class CoursePathStore: ObservableObject {
         CoursePathTaskPresentation.sorted((snapshot?.tasks ?? []).filter { $0.date == day })
     }
     func setContentVisible(_ visible: Bool, source: UUID) {
+        updateCurrentDay()
         let changed = visible ? visibleSources.insert(source).inserted : visibleSources.remove(source) != nil
         guard changed else { return }
         // A newly visible tab/display shares the same throttle and polling loop.
@@ -132,28 +175,44 @@ final class CoursePathStore: ObservableObject {
     }
     // Used for opening, tab changes and wake. Explicit refreshes and post-mutation
     // snapshots remain immediate; failed lifecycle reads are also rate limited.
+    private var visibilityRefreshDelay: TimeInterval? {
+        guard !visibleSources.isEmpty, !isAsleep, !isBusy else { return nil }
+        let dayChanged = lastSnapshotDay.map { $0 != currentDay } ?? false
+        guard dayChanged || (lastUpdated.map({ now().timeIntervalSince($0) >= visibilityRefreshInterval }) ?? true) else { return nil }
+        guard let lastRequestStarted, CoursePathDate.key(lastRequestStarted) == currentDay else { return 0 }
+        return max(0, visibilityRefreshInterval - now().timeIntervalSince(lastRequestStarted))
+    }
     @discardableResult
     func refreshVisibleContent() async -> Bool {
-        guard !visibleSources.isEmpty, !isBusy,
-              lastUpdated.map({ now().timeIntervalSince($0) >= visibilityRefreshInterval }) ?? true,
-              lastRequestStarted.map({ now().timeIntervalSince($0) >= visibilityRefreshInterval }) ?? true else { return false }
+        updateCurrentDay()
+        guard visibilityRefreshDelay == 0 else { return false }
         return await refresh()
     }
     private func restartPolling() {
         pollingTask?.cancel(); pollingTask = nil
-        guard !visibleSources.isEmpty else {
-            // Cancel reads when all CoursePath surfaces leave view; disconnect also invalidates writes.
-            if requestTask != nil && !isMutationInFlight { cancelRequests(); status = hasCredential ? .ready : .disconnected }
+        guard !visibleSources.isEmpty, hasCredential, !isAsleep else {
+            // Hidden/asleep reads are dispensable. Already-issued user writes must finish.
+            if requestTask != nil && !isMutationInFlight {
+                cancelRequests(); status = hasCredential ? .ready : .disconnected
+                message = hasCredential ? "Ready to refresh connection." : "Not connected."
+            }
             return
         }
+        let interval = pollInterval
         pollingTask = Task { [weak self] in
-            guard let self else { return }
-            guard !Task.isCancelled, !self.visibleSources.isEmpty else { return }
-            _ = await self.refreshVisibleContent()
-            while !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000)) } catch { return }
+            guard !Task.isCancelled else { return }
+            // A canceled first read must retry after the shared throttle, rather
+            // than waiting a whole polling interval after a rapid close/reopen.
+            if let delay = self?.visibilityRefreshDelay {
+                do { if delay > 0 { try await Task.sleep(for: .seconds(delay)) } } catch { return }
                 guard !Task.isCancelled else { return }
-                _ = await self.refresh()
+                _ = await self?.refreshVisibleContent()
+            }
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000)) } catch { return }
+                // Do not hold a strong store reference across the timer's suspension.
+                guard !Task.isCancelled, let store = self else { return }
+                _ = await store.refresh()
             }
         }
     }

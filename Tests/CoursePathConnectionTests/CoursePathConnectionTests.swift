@@ -38,13 +38,15 @@ private final class MemoryCredentials: CoursePathCredentialStorage {
     var error: CoursePathError?
     var mutationError: CoursePathError?
     var reads = 0
+    var readDays: [String] = []
+    var readTimes: [TimeInterval] = []
     var writes: [(String, Bool, Int)] = []
     var hold = false
     var held: CheckedContinuation<CoursePathSnapshot, Error>?
     var holdMutation = false
     var heldMutation: CheckedContinuation<Void, Never>?
     func snapshot(server: CoursePathServer, token: String, today: String) async throws -> CoursePathSnapshot {
-        reads += 1
+        reads += 1; readDays.append(today); readTimes.append(ProcessInfo.processInfo.systemUptime)
         if let error { throw error }
         if hold { return try await withCheckedThrowingContinuation { held = $0 } }
         return result
@@ -230,6 +232,161 @@ final class CoursePathConnectionTests: XCTestCase {
         api.held?.resume(returning: sample(7)); _ = await read.value
         store.setContentVisible(false, source: source); store.setContentVisible(false, source: second)
         XCTAssertEqual(store.snapshot?.revision, 7)
+    }
+    func testPollingDoesNotRetainAnOtherwiseReleasedStore() async throws {
+        let api = MockAPI(), source = UUID()
+        var candidate: CoursePathStore? = store(api, pollInterval: 3600)
+        _ = await candidate?.connect(testToken)
+        candidate?.setContentVisible(true, source: source)
+        try await Task.sleep(for: .milliseconds(10))
+        weak var released = candidate
+        candidate = nil
+        await Task.yield()
+        XCTAssertNil(released)
+        released?.setContentVisible(false, source: source) // Clean up a failing baseline.
+    }
+    func testDisconnectedAndExpiredConnectionsHaveNoPollingTimer() async throws {
+        let api = MockAPI(), store = store(api), source = UUID()
+        store.setContentVisible(true, source: source)
+        XCTAssertFalse(store.hasActivePolling)
+        XCTAssertEqual(api.reads, 0)
+        _ = await store.connect(testToken)
+        XCTAssertTrue(store.hasActivePolling)
+        api.error = .unauthorized
+        _ = await store.refresh()
+        XCTAssertEqual(store.status, .expired)
+        XCTAssertFalse(store.hasActivePolling)
+        XCTAssertFalse(store.hasCredential)
+        store.setContentVisible(false, source: source)
+    }
+    func testSleepCancelsOldReadWakeLoadsFreshAndOldResultCannotOverwrite() async throws {
+        let api = MockAPI(), source = UUID()
+        var clock = CoursePathDate.date("2026-10-09")!
+        let store = store(api, now: { clock }); _ = await store.connect(testToken)
+        store.setContentVisible(true, source: source)
+        api.hold = true
+        let read = Task { await store.refresh() }
+        while api.held == nil { await Task.yield() }
+        let oldRequest = api.held!
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertFalse(store.hasActivePolling); XCTAssertFalse(store.isBusy)
+        let asleepRefresh = await store.refreshVisibleContent(); XCTAssertFalse(asleepRefresh)
+        clock.addTimeInterval(60); api.hold = false; api.result = sample(7)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertTrue(store.hasActivePolling); XCTAssertEqual(store.snapshot?.revision, 7)
+        oldRequest.resume(returning: sample(99)); _ = await read.value
+        XCTAssertEqual(store.snapshot?.revision, 7); XCTAssertEqual(api.reads, 3)
+        // Repeated wake notifications reuse freshness, not duplicate immediate reads.
+        for _ in 0..<5 { NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil) }
+        try await Task.sleep(for: .milliseconds(10)); XCTAssertEqual(api.reads, 3)
+        store.setContentVisible(false, source: source); XCTAssertFalse(store.hasActivePolling)
+    }
+    func testSleepDuringMutationDoesNotCancelOrDuplicateCompletion() async throws {
+        let api = MockAPI(), source = UUID()
+        let active = store(api); _ = await active.connect(testToken)
+        active.setContentVisible(true, source: source); api.holdMutation = true
+        let write = Task { await active.setTaskCompletion("first", completed: true) }
+        while api.heldMutation == nil { await Task.yield() }
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertTrue(active.isBusy); XCTAssertFalse(active.hasActivePolling)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(10)); XCTAssertEqual(api.writes.count, 1)
+        api.heldMutation?.resume(); let confirmed = await write.value
+        XCTAssertTrue(confirmed); XCTAssertEqual(active.snapshot?.revision, 5)
+        XCTAssertTrue(active.snapshot!.tasks.first(where: { $0.id == "first" })!.completed)
+        XCTAssertEqual(api.writes.count, 1)
+        active.setContentVisible(false, source: source)
+        XCTAssertFalse(active.hasActivePolling)
+    }
+    func testMidnightRefreshUsesNewDayAndOfflineAttemptsRemainThrottled() async throws {
+        let api = MockAPI(), source = UUID()
+        var clock = CoursePathDate.date("2026-10-11")!
+        let store = store(api, now: { clock }); _ = await store.connect(testToken)
+        store.setContentVisible(true, source: source)
+        clock = CoursePathDate.date("2026-10-12")!
+        api.error = .offline
+        NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(store.currentDay, "2026-10-12"); XCTAssertEqual(api.readDays.last, "2026-10-12")
+        XCTAssertEqual(store.snapshot?.revision, 4); XCTAssertEqual(store.status, .offline)
+        let reads = api.reads
+        for _ in 0..<5 { _ = await store.refreshVisibleContent() }
+        XCTAssertEqual(api.reads, reads)
+        clock.addTimeInterval(6); api.error = nil
+        let fresh = await store.refreshVisibleContent(); XCTAssertTrue(fresh)
+        XCTAssertEqual(api.reads, reads + 1); XCTAssertEqual(store.status, .connected)
+        store.setContentVisible(false, source: source)
+    }
+    func testAReadCrossingMidnightRefetchesForTheNewDay() async throws {
+        let api = MockAPI(), source = UUID()
+        var clock = CoursePathDate.date("2026-10-11")!
+        let store = store(api, now: { clock }); _ = await store.connect(testToken)
+        store.setContentVisible(true, source: source); api.hold = true
+        let read = Task { await store.refresh() }
+        while api.held == nil { await Task.yield() }
+        clock = CoursePathDate.date("2026-10-12")!; api.hold = false
+        api.held?.resume(returning: sample(5)); api.result = sample(6)
+        _ = await read.value
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(store.currentDay, "2026-10-12")
+        XCTAssertEqual(api.readDays, ["2026-10-11", "2026-10-11", "2026-10-12"])
+        XCTAssertEqual(store.snapshot?.revision, 6)
+        store.setContentVisible(false, source: source)
+    }
+    func testRecreatedStoreRestoresServerCredentialAndExistingPreferences() async throws {
+        let preferencesName = "dev.coursepath.notch.restart." + UUID().uuidString
+        let preferences = UserDefaults(suiteName: preferencesName)!
+        defer { preferences.removePersistentDomain(forName: preferencesName) }
+        let credentials = CoursePathKeychain(service: preferencesName)
+        defer { try? credentials.delete(server: .production) }
+        preferences.set(CoursePathServer.production.rawValue, forKey: "CoursePath.server")
+        preferences.set(true, forKey: "openLastTabByDefault")
+        try credentials.save(testToken, server: .production)
+        let api = MockAPI(), restarted = CoursePathStore(api: api, credentials: credentials, preferences: preferences)
+        XCTAssertEqual(restarted.server, .production); XCTAssertTrue(restarted.hasCredential)
+        XCTAssertEqual(restarted.status, .ready); XCTAssertNil(restarted.snapshot)
+        XCTAssertFalse(restarted.hasActivePolling); XCTAssertEqual(api.reads, 0)
+        XCTAssertTrue(preferences.bool(forKey: "openLastTabByDefault"))
+        let source = UUID(); restarted.setContentVisible(true, source: source)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertEqual(api.reads, 1); XCTAssertEqual(restarted.status, .connected)
+        restarted.setContentVisible(false, source: source)
+        XCTAssertEqual(try credentials.read(server: .production), testToken)
+    }
+    func testDefaultVisiblePollingCadenceAndClosedNetworkSilence() async throws {
+        let api = MockAPI(), store = store(api), source = UUID()
+        _ = await store.connect(testToken); store.setContentVisible(true, source: source)
+        try await Task.sleep(for: .seconds(20.2))
+        XCTAssertEqual(api.reads, 2)
+        if api.readTimes.count == 2 {
+            let interval = api.readTimes[1] - api.readTimes[0]
+            print("Observed default polling interval: \(interval) seconds")
+            XCTAssertGreaterThanOrEqual(interval, 19.5); XCTAssertLessThan(interval, 23)
+        }
+        store.setContentVisible(false, source: source)
+        try await Task.sleep(for: .milliseconds(100)); XCTAssertEqual(api.reads, 2)
+        XCTAssertFalse(store.hasActivePolling)
+        store.disconnect(); XCTAssertFalse(store.hasActivePolling)
+    }
+    func testCanceledInitialReadRetriesAfterThrottleOnRapidReopen() async throws {
+        let api = MockAPI(), credentials = MemoryCredentials(), source = UUID()
+        credentials.values[.local] = testToken
+        let store = store(api, credentials: credentials, now: Date.init)
+        api.hold = true; store.setContentVisible(true, source: source)
+        while api.held == nil { await Task.yield() }
+        let canceled = api.held!
+        store.setContentVisible(false, source: source)
+        api.hold = false; store.setContentVisible(true, source: source)
+        // Preserve the five-second throttle; do not start another immediate read.
+        try await Task.sleep(for: .milliseconds(20)); XCTAssertEqual(api.reads, 1)
+        canceled.resume(returning: sample(99))
+        try await Task.sleep(for: .seconds(5.1))
+        XCTAssertEqual(api.reads, 2); XCTAssertEqual(store.snapshot?.revision, 4)
+        XCTAssertEqual(store.status, .connected)
+        store.setContentVisible(false, source: source)
     }
     func testRealKeychainLifecycle() throws {
         // Isolated temporary service, never the user's actual CoursePath credential.

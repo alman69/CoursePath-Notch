@@ -9,10 +9,11 @@ struct CoursePathTabView: View {
     @ObservedObject private var completion = CoursePathCompletionController.shared
     @Default(.showFullEventTitles) private var showFullEventTitles
     @State private var visibilityID = UUID()
+    @State private var calendarDay = CoursePathDate.key(.now)
     @State private var selection = CoursePathWeekSelection(today: CoursePathDate.key(.now))
 
     var body: some View {
-        let today = CoursePathDate.key(.now)
+        let today = store.currentDay
         let data = CoursePathWeekData(snapshot: store.snapshot, selection: selection, today: today)
         Group {
             if store.snapshot == nil {
@@ -98,7 +99,8 @@ struct CoursePathTabView: View {
             }
         }
         .frame(maxWidth: .infinity).frame(height: 120, alignment: .top)
-        .onAppear { updateVisibility() }
+        .onAppear { advanceDay(store.currentDay); updateVisibility() }
+        .onChange(of: store.currentDay) { _, current in advanceDay(current) }
         .onChange(of: vm.notchState) { _, _ in updateVisibility() }
         .onChange(of: coordinator.currentView) { _, _ in updateVisibility() }
         .onChange(of: store.server) { _, _ in completion.clearNotice() }
@@ -152,6 +154,10 @@ struct CoursePathTabView: View {
                 .help(day.id + ": " + CoursePathTaskPresentation.duration(day.plannedMinutes) + " planned")
             }
         }
+    }
+    private func advanceDay(_ day: String) {
+        selection.advanceToday(from: calendarDay, to: day)
+        calendarDay = day
     }
     private func updateVisibility() {
         store.setContentVisible(vm.notchState == .open && coordinator.currentView == .coursePath, source: visibilityID)
