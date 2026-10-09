@@ -16,3 +16,13 @@ Launch at Login uses Apple's existing `SMAppService.mainApp`. An already-enabled
 Ad-hoc signing is for this Mac's private testing, with no Developer ID or notarization. macOS may ask again for Keychain/accessibility/camera/calendar approval when code changes. Replacement preserves stored credentials but cannot guarantee approval-free Keychain access across different ad-hoc signatures. Use macOS prompts normally; do not weaken Gatekeeper or library validation. The original Boring Notch updater remains disabled.
 
 Manual checks: launch the installed app, test music/artwork, Shelf drag/drop, mirror, gestures, all tabs and Settings search; reconnect CoursePath as needed; close/reopen, sleep/wake and reconnect the monitor; enable login startup and reboot; verify only the installed CoursePath Notch launches. Test a replacement after quitting, then check settings and connection again. Hardware, reboot and interactive permission prompts remain unverified until performed.
+
+# Browser authorization development checkpoint
+
+Browser pairing and renewable credentials are implemented behind local development flags; the installed Release app retains manual-token authentication. See `../CoursePath App/DESKTOP-PAIRING.md` for the protocol, expiration policy, guards and manual setup. No real Clerk/browser callback test has run. Do not enable production pairing or treat this as a public authentication release.
+
+The native tests include separate Keychain persistence, PKCE/state validation, concurrent renewal serialization, ambiguous-response handling, cancellation and task completion after renewal. `python3 Tests/run-local-connection-test.py --pairing` exercises real local HTTP and sandboxed Keychain integration with simulated Clerk consent and disposable data; omit the flag for the existing manual-token probe.
+
+Website companion checkpoint: `3c2f06a` on `coursepath-notch-integration`. Native stability and installation checkpoints: `46104f5` and `1a2abc9` on `coursepath-integration`. Final automated checks: 64 native tests, 540 website tests, Debug/Release builds, website production build, and isolated manual/paired HTTP probes. Real browser consent remains unverified.
+
+Changed native authentication files: `CoursePathAuth.swift`, `CoursePathBrowserSession.swift`, `CoursePathStore.swift`, `CoursePathAPI.swift`, `CoursePathConnectionSettings.swift`, `Info.plist`, `Package.swift`, `CoursePathAuthTests.swift`, `LocalPairingProbe.swift`, `local-backend-fixture.mjs`, `run-local-connection-test.py`, and this document. Earlier checkpoints contain the calendar/day-rollover, window/observer cleanup, weak capture, installation script/hook and their regression tests. No music, Shelf, mirror or gesture UI was redesigned.

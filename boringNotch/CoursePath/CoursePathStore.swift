@@ -17,6 +17,9 @@ final class CoursePathStore: ObservableObject {
     var isCached: Bool { snapshot != nil && status != .connected }
     var upcomingDeadlines: [CoursePathDeadline] { snapshot?.upcomingDeadlines ?? [] }
     private let api: CoursePathAPI
+    private let auth: CoursePathAuth
+    @Published private(set) var pairingConfirmation: String?
+    var browserPairingEnabled: Bool { auth.enabled && server != .production }
     private let credentials: CoursePathCredentialStorage
     private let preferences: UserDefaults
     private let now: () -> Date
@@ -36,7 +39,8 @@ final class CoursePathStore: ObservableObject {
     private var isAsleep = false
     private var lastSnapshotDay: String?
 
-    init(api: CoursePathAPI = CoursePathAPIClient(), credentials: CoursePathCredentialStorage = CoursePathKeychain(), preferences: UserDefaults = .standard, now: @escaping () -> Date = Date.init, pollInterval: TimeInterval = 20) {
+    init(api: CoursePathAPI = CoursePathAPIClient(), credentials: CoursePathCredentialStorage = CoursePathKeychain(), preferences: UserDefaults = .standard, now: @escaping () -> Date = Date.init, pollInterval: TimeInterval = 20, auth: CoursePathAuth? = nil) {
+        self.auth = auth ?? CoursePathAuth()
         self.api = api; self.credentials = credentials; self.preferences = preferences; self.now = now; self.pollInterval = pollInterval
         currentDay = CoursePathDate.key(now())
         server = CoursePathServer(rawValue: preferences.string(forKey: "CoursePath.server") ?? "") ?? .local
@@ -77,10 +81,11 @@ final class CoursePathStore: ObservableObject {
     }
     private func restoreCredential() {
         do {
-            token = try credentials.read(server: server); hasCredential = token != nil
+            try auth.load(server: server)
+            token = try auth.credential?.accessToken ?? credentials.read(server: server); hasCredential = token != nil
             status = hasCredential ? .ready : .disconnected
             message = hasCredential ? "Ready to verify connection." : "Not connected."
-        } catch { status = .failed; message = error.localizedDescription }
+        } catch { status = error as? CoursePathError == .unauthorized ? .expired : .failed; message = error.localizedDescription }
     }
     func selectServer(_ server: CoursePathServer) {
         guard server != self.server else { return }
@@ -90,7 +95,7 @@ final class CoursePathStore: ObservableObject {
     }
     @discardableResult
     func connect(_ input: String) async -> Bool {
-        guard !isBusy else { return false }
+        guard auth.credential == nil, !isBusy else { return false }
         let candidate = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard candidate.range(of: #"^cpn_[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil else {
             status = .failed; message = CoursePathError.invalidToken.localizedDescription; return false
@@ -110,11 +115,14 @@ final class CoursePathStore: ObservableObject {
     // In-memory, authoritative data only; no speculative completion toggles or calendar disk cache.
     private func perform(candidate: String, mutation: (String, Bool, Int)? = nil) async -> Bool {
         updateCurrentDay()
-        let version = generation, server = server, today = currentDay, api = api
+        let version = generation, server = server, today = currentDay, api = api, auth = auth
+        let paired = auth.credential != nil
         lastRequestStarted = now()
         isBusy = true; isMutationInFlight = mutation != nil; status = .connecting; message = "Connecting…"
         var conflicted = false
         let request = Task<CoursePathSnapshot, Error> {
+            try Task.checkCancellation()
+            let candidate = paired ? try await auth.accessToken(server: server) : candidate
             try Task.checkCancellation()
             if let mutation {
                 do { _ = try await api.complete(server: server, token: candidate, taskId: mutation.0, completed: mutation.1, revision: mutation.2) }
@@ -134,8 +142,8 @@ final class CoursePathStore: ObservableObject {
             let result = try await request.value
             guard generation == version, !request.isCancelled else { return false }
             guard result.revision >= (self.snapshot?.revision ?? 0) else { throw CoursePathError.invalidResponse }
-            if token != candidate || !hasCredential { try credentials.save(candidate, server: server) }
-            token = candidate; hasCredential = true; self.snapshot = result; lastUpdated = now(); lastSnapshotDay = today; status = .connected
+            if !paired && (token != candidate || !hasCredential) { try credentials.save(candidate, server: server) }
+            token = paired ? auth.credential?.accessToken : candidate; hasCredential = true; self.snapshot = result; lastUpdated = now(); lastSnapshotDay = today; status = .connected
             updateCurrentDay()
             if today != currentDay { Task { [weak self] in await self?.refreshVisibleContent() } }
             message = conflicted ? "The calendar changed. Latest progress loaded; review before trying again." : "Connected."
@@ -145,7 +153,7 @@ final class CoursePathStore: ObservableObject {
             if error as? CoursePathError == .unauthorized {
                 token = nil; hasCredential = false; self.snapshot = nil; lastUpdated = nil; lastSnapshotDay = nil; status = .expired
                 pollingTask?.cancel(); pollingTask = nil
-                do { try credentials.delete(server: server) }
+                do { if paired { _ = try auth.remove(server: server) } else { try credentials.delete(server: server) } }
                 catch { message = "Access expired. Disconnect to remove the stored credential."; return false }
             } else { status = hasCredential ? .offline : .failed }
             message = (error as? CoursePathError)?.localizedDescription ?? "CoursePath could not be reached."
@@ -155,12 +163,34 @@ final class CoursePathStore: ObservableObject {
     }
     func disconnect() {
         cancelRequests(); token = nil; hasCredential = false; snapshot = nil; lastUpdated = nil; lastRequestStarted = nil; lastSnapshotDay = nil
-        do { try credentials.delete(server: server); status = .disconnected; message = "Disconnected. Revoke the device in CoursePath Settings to also remove server access." }
+        do {
+            let previous = try auth.remove(server: server)
+            try credentials.delete(server: server)
+            if let previous { let server = server; Task { try? await auth.revoke(previous, server: server) } }
+            status = .disconnected; message = "Disconnected. Revoke the device in CoursePath Settings to also remove server access." }
         catch { status = .failed; message = error.localizedDescription }
         restartPolling()
     }
+    @discardableResult
+    func connectBrowser(browser: (URL) async throws -> URL) async -> Bool {
+        guard browserPairingEnabled, !isBusy, !hasCredential else { return false }
+        let version = generation, server = server
+        isBusy = true; status = .connecting; message = "Approve the connection in your browser."
+        defer { if generation == version { isBusy = false; pairingConfirmation = nil } }
+        do {
+            try await auth.authorize(server: server, confirmation: { self.pairingConfirmation = $0 }, browser: browser)
+            guard generation == version, let credential = auth.credential else { return false }
+            token = credential.accessToken; hasCredential = true; isBusy = false
+            return await refresh()
+        } catch {
+            guard generation == version else { return false }
+            status = .failed; pairingConfirmation = nil
+            message = error is CancellationError ? "Connection canceled. Start connecting again when ready." : (error as? CoursePathError)?.localizedDescription ?? "Connection failed. Start connecting again."
+            return false
+        }
+    }
     private func cancelRequests() {
-        generation = UUID(); requestTask?.cancel(); requestTask = nil; isBusy = false; isMutationInFlight = false
+        generation = UUID(); pairingConfirmation = nil; requestTask?.cancel(); requestTask = nil; isBusy = false; isMutationInFlight = false
     }
     func tasks(on day: String) -> [CoursePathTask] {
         CoursePathTaskPresentation.sorted((snapshot?.tasks ?? []).filter { $0.date == day })

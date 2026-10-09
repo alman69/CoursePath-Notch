@@ -3,6 +3,8 @@ import AppKit
 
 struct CoursePathConnectionSettings: View {
     @ObservedObject private var store = CoursePathStore.shared
+    @State private var browser = CoursePathBrowserSession()
+    @State private var pairingTask: Task<Void, Never>?
     @State private var pastedToken = ""
     @State private var visibilityID = UUID()
 
@@ -10,12 +12,21 @@ struct CoursePathConnectionSettings: View {
         Form {
             Section("CoursePath connection") {
                 Picker("Server", selection: Binding(get: { store.server }, set: {
-                    pastedToken = ""; store.selectServer($0)
+                    pairingTask?.cancel(); browser.cancel(); pastedToken = ""; store.selectServer($0)
                 })) {
                     ForEach(CoursePathServer.allCases) { server in Text(server.label).tag(server) }
                 }
                 Text(store.server.baseURL.absoluteString).font(.caption).foregroundStyle(.secondary)
                 if !store.hasCredential {
+                    if store.browserPairingEnabled {
+                        Button("Connect CoursePath") {
+                            pairingTask = Task { _ = await store.connectBrowser(browser: browser.open) }
+                        }.disabled(store.isBusy)
+                        if let code = store.pairingConfirmation {
+                            Text("Confirmation code: " + code).monospaced().textSelection(.enabled)
+                            Button("Cancel connection") { pairingTask?.cancel(); browser.cancel() }
+                        }
+                    }
                     SecureField("Desktop access token", text: $pastedToken)
                         .textContentType(.password)
                     Button("Connect") {
@@ -27,7 +38,7 @@ struct CoursePathConnectionSettings: View {
                 HStack {
                     Button("Refresh") { Task { await store.refresh() } }
                         .disabled(store.isBusy || !store.hasCredential)
-                    Button("Disconnect") { pastedToken = ""; store.disconnect() }
+                    Button("Disconnect") { pairingTask?.cancel(); browser.cancel(); pastedToken = ""; store.disconnect() }
                         .disabled(store.status == .disconnected)
                     if store.isBusy { ProgressView().controlSize(.small) }
                 }
@@ -43,13 +54,13 @@ struct CoursePathConnectionSettings: View {
             }
             .settingsSearchSection("coursepath.connection")
             Section {
-                Text("Generate a desktop token in CoursePath Settings → CoursePath Notch. Credentials stay in this Mac’s Keychain. Each server uses its own credential.")
+                Text(store.browserPairingEnabled ? "Connect through your browser and confirm the code shown here. Manual desktop tokens remain available as a development fallback. Credentials stay in this Mac’s Keychain." : "Generate a desktop token in CoursePath Settings → CoursePath Notch. Credentials stay in this Mac’s Keychain. Each server uses its own credential.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .navigationTitle("CoursePath")
         .background(CoursePathSettingsVisibility { visible in store.setContentVisible(visible, source: visibilityID) })
-        .onDisappear { pastedToken = ""; store.setContentVisible(false, source: visibilityID) }
+        .onDisappear { pairingTask?.cancel(); browser.cancel(); pastedToken = ""; store.setContentVisible(false, source: visibilityID) }
     }
 }
 

@@ -5,7 +5,7 @@ protocol CoursePathAPI {
     func complete(server: CoursePathServer, token: String, taskId: String, completed: Bool, revision: Int) async throws -> CoursePathCompletion
 }
 
-private final class CoursePathNoRedirects: NSObject, URLSessionTaskDelegate {
+final class CoursePathNoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil) // Never forward bearer credentials to a redirect target.
     }
