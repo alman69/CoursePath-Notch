@@ -272,6 +272,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        CoursePathInstallation.refreshEnabledLoginItem()
 
         NotificationCenter.default.addObserver(
             self,
