@@ -32,6 +32,9 @@ struct SettingsView: View {
                 NavigationLink(value: "Calendar") {
                     Label("Calendar", systemImage: "calendar")
                 }
+                NavigationLink(value: "CoursePath") {
+                    Label("CoursePath", systemImage: "link")
+                }
                 NavigationLink(value: "HUD") {
                     Label("HUDs", systemImage: "dial.medium.fill")
                 }
@@ -72,6 +75,8 @@ struct SettingsView: View {
                     Media()
                 case "Calendar":
                     CalendarSettings()
+                case "CoursePath":
+                    CoursePathConnectionSettings()
                 case "HUD":
                     HUD()
                 case "Battery":
