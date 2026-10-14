@@ -46,9 +46,9 @@ struct CoursePathPairedCredential: Codable, Equatable {
 struct CoursePathPairing: Decodable {
     let requestId, authorizationURL, confirmation: String
     let expiresIn: Int
-    func browserURL() throws -> URL {
+    func browserURL(server: CoursePathServer = .local) throws -> URL {
         guard let url = URL(string: authorizationURL), let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              ["http://127.0.0.1:5173", "http://localhost:5173"].contains("\(parts.scheme ?? "")://\(parts.host ?? ""):\(parts.port ?? 0)"),
+              (server == .production ? url.scheme == "https" && url.host == "app.coursepath.dev" && parts.port == nil : ["http://127.0.0.1:5173", "http://localhost:5173"].contains("\(parts.scheme ?? "")://\(parts.host ?? ""):\(parts.port ?? 0)")),
               parts.user == nil, parts.password == nil, parts.fragment == nil, parts.path == "/desktop/connect",
               parts.queryItems == [URLQueryItem(name: "request", value: requestId)],
               requestId.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
@@ -82,13 +82,12 @@ struct CoursePathAuthClient: CoursePathAuthAPI {
         }
     }
     private func post<T: Decodable>(_ route: String, server: CoursePathServer, body: [String: String]) async throws -> T {
-        // Until live browser verification, no paired requests can reach production.
-        guard server != .production else { throw CoursePathError.unauthorized }
+        // Fixed server presets, redirects refused; the backend controls enablement.
         var request = URLRequest(url: server.baseURL.appendingPathComponent("api/desktop-auth/" + route))
         request.httpMethod = "POST"; request.httpBody = try JSONEncoder().encode(body)
         request.setValue("1", forHTTPHeaderField: "X-CoursePath")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("http://127.0.0.1:5173", forHTTPHeaderField: "Origin")
+        request.setValue(server == .production ? "https://app.coursepath.dev" : "http://127.0.0.1:5173", forHTTPHeaderField: "Origin")
         do {
             let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse else { throw CoursePathError.invalidResponse }
@@ -126,7 +125,9 @@ struct CoursePathAuthClient: CoursePathAuthAPI {
 @MainActor
 final class CoursePathAuth {
     static var developmentEnabled: Bool {
-        #if DEBUG
+        #if COURSEPATH_MVP_RELEASE
+        return true
+        #elseif DEBUG
         return ProcessInfo.processInfo.environment["COURSEPATH_BROWSER_PAIRING"] == "1"
         #else
         return false
@@ -146,7 +147,7 @@ final class CoursePathAuth {
     }
     func load(server: CoursePathServer) throws {
         generation = UUID(); renewal?.cancel(); renewal = nil; credential = nil; loadedServer = server; renewalUncertain = false
-        guard enabled, server != .production else { return }
+        guard enabled else { return }
         guard let json = try storage.read(server: server) else { return }
         do {
             let value = try JSONDecoder().decode(CoursePathPairedCredential.self, from: Data(json.utf8))
@@ -160,12 +161,12 @@ final class CoursePathAuth {
         credential = value; loadedServer = server; renewalUncertain = false
     }
     func authorize(server: CoursePathServer, confirmation: (String) -> Void, browser: (URL) async throws -> URL) async throws {
-        guard enabled, server != .production, credential == nil else { throw CoursePathError.unauthorized }
+        guard enabled, credential == nil else { throw CoursePathError.unauthorized }
         let version = generation, pkce = try CoursePathPKCE()
         let pairing = try await api.start(server: server, pkce: pkce)
         do {
             try Task.checkCancellation(); guard generation == version else { throw CancellationError() }
-            let url = try pairing.browserURL(); confirmation(pairing.confirmation)
+            let url = try pairing.browserURL(server: server); confirmation(pairing.confirmation)
             let callback = try await browser(url)
             try Task.checkCancellation(); guard generation == version else { throw CancellationError() }
             let code = try pkce.code(from: callback)
@@ -174,11 +175,11 @@ final class CoursePathAuth {
             do {
                 try Task.checkCancellation(); guard generation == version else { throw CancellationError() }
                 try save(result, server: server)
-            } catch { try? await api.revoke(server: server, refreshToken: result.refreshToken); throw error }
-        } catch { try? await api.cancel(server: server, requestId: pairing.requestId, verifier: pkce.verifier); throw error }
+            } catch { await Task { try? await api.revoke(server: server, refreshToken: result.refreshToken) }.value; throw error }
+        } catch { await Task { try? await api.cancel(server: server, requestId: pairing.requestId, verifier: pkce.verifier) }.value; throw error }
     }
     func accessToken(server: CoursePathServer) async throws -> String {
-        guard enabled, server != .production, loadedServer == server, let old = credential, !renewalUncertain else { throw CoursePathError.unauthorized }
+        guard enabled, loadedServer == server, let old = credential, !renewalUncertain else { throw CoursePathError.unauthorized }
         guard old.sessionExpiresAt > now() else { throw CoursePathError.unauthorized }
         if old.accessExpiresAt > now().addingTimeInterval(30) { return old.accessToken }
         if let renewal { return try await renewal.value.accessToken }
@@ -186,14 +187,32 @@ final class CoursePathAuth {
         // Single flight. Once rotation has been issued, finish and persist it even if
         // a visibility read is canceled; losing that response would lose the session.
         let task = Task { [self] in
+            var dispatched = false
             do {
-                let next = try await api.renew(server: server, refreshToken: old.refreshToken)
+                let lease = try storage.coordinationNamespace.map { try CoursePathCredentialLock(namespace: $0, server: server) }
+                try await lease?.acquire()
+                defer { withExtendedLifetime(lease) {} }
+                guard generation == version else { throw CancellationError() }
+                guard let json = try storage.read(server: server) else { throw CoursePathError.unauthorized }
+                let current = try JSONDecoder().decode(CoursePathPairedCredential.self, from: Data(json.utf8))
+                try current.validate(now: now())
+                guard current.deviceId == old.deviceId else { throw CoursePathError.unauthorized }
+                if current.refreshToken != old.refreshToken {
+                    credential = current
+                    guard current.accessExpiresAt > now().addingTimeInterval(30) else { throw CoursePathError.http(429) }
+                    return current
+                }
+                dispatched = true
+                let next = try await api.renew(server: server, refreshToken: current.refreshToken)
                 guard generation == version else { throw CancellationError() }
                 guard next.deviceId == old.deviceId, next.refreshToken != old.refreshToken else { throw CoursePathError.invalidResponse }
                 try save(next, server: server)
                 return next
             } catch {
-                if generation == version { renewalUncertain = true }
+                // 429 and identity-verification 503 are definitive pre-rotation
+                // rejections. Transport failures remain ambiguous and are not retried.
+                if generation == version, dispatched,
+                   error as? CoursePathError != .http(429), error as? CoursePathError != .http(503) { renewalUncertain = true }
                 throw error
             }
         }

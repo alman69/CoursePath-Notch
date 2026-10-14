@@ -1,0 +1,7 @@
+Upstream: https://github.com/ungive/mediaremote-adapter
+Revision: dc0eb4bfd0aae1e5db574b249c656e3cbcee61f0
+License: BSD 3-Clause (LICENSE)
+This is the upstream source at the time of the Boring Notch vendor update.
+Its Perl bridge matches the existing bundled bridge byte-for-byte.
+The MVP packaging script rebuilds this source with Xcode's clang, so the
+release's embedded adapter has explicitly identified corresponding source.

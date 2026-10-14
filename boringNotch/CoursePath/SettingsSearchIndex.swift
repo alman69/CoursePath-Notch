@@ -29,7 +29,18 @@ struct SettingsSearchEntry: Identifiable, Equatable {
 }
 
 enum SettingsSearchIndex {
-    static let entries: [SettingsSearchEntry] = [
+    static var entries: [SettingsSearchEntry] {
+#if COURSEPATH_MVP_RELEASE
+        publicEntries
+#else
+        developerEntries
+#endif
+    }
+    // Use the same public catalog in release builds and isolated regression tests.
+    static var publicEntries: [SettingsSearchEntry] {
+        developerEntries.filter { !["coursepath.server", "coursepath.desktopToken", "coursepath.connect"].contains($0.id) }
+    }
+    static let developerEntries: [SettingsSearchEntry] = [
         SettingsSearchEntry(id: "general.menubarIcon", title: "Show menu bar icon", category: "General", categoryTitle: "General", section: "System features", sectionID: "general.system", keywords: "status tray", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "general.launchAtLogin", title: "Launch at login", category: "General", categoryTitle: "General", section: "System features", sectionID: "general.system", keywords: "startup start login", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "general.showOnAllDisplays", title: "Show on all displays", category: "General", categoryTitle: "General", section: "System features", sectionID: "general.system", keywords: "monitor screen", requirement: nil, unavailableReason: nil),
@@ -68,13 +79,7 @@ enum SettingsSearchIndex {
         SettingsSearchEntry(id: "media.musicControlSlots", title: "Layout Preview", category: "Media", categoryTitle: "Media", section: "Media controls", sectionID: "media.controls", keywords: "music buttons reorder volume shuffle repeat favorite", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "media.resetMusicControls", title: "Reset to Defaults", category: "Media", categoryTitle: "Media", section: "Media controls", sectionID: "media.controls", keywords: "music buttons", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "media.enableLyrics", title: "Show lyrics below artist name", category: "Media", categoryTitle: "Media", section: "Media controls", sectionID: "media.controls", keywords: "music", requirement: nil, unavailableReason: nil),
-        SettingsSearchEntry(id: "calendar.showCalendar", title: "Show calendar", category: "Calendar", categoryTitle: "Calendar", section: "Calendar", sectionID: "calendar.general", keywords: "events", requirement: nil, unavailableReason: nil),
-        SettingsSearchEntry(id: "calendar.hideCompletedReminders", title: "Hide completed reminders", category: "Calendar", categoryTitle: "Calendar", section: "Calendar", sectionID: "calendar.general", keywords: "tasks", requirement: nil, unavailableReason: nil),
-        SettingsSearchEntry(id: "calendar.hideAllDayEvents", title: "Hide all-day events", category: "Calendar", categoryTitle: "Calendar", section: "Calendar", sectionID: "calendar.general", keywords: "events", requirement: nil, unavailableReason: nil),
-        SettingsSearchEntry(id: "calendar.autoScrollToNextEvent", title: "Auto-scroll to next event", category: "Calendar", categoryTitle: "Calendar", section: "Calendar", sectionID: "calendar.general", keywords: "events", requirement: nil, unavailableReason: nil),
-        SettingsSearchEntry(id: "calendar.showFullEventTitles", title: "Always show full event titles", category: "Calendar", categoryTitle: "Calendar", section: "Calendar", sectionID: "calendar.general", keywords: "tasks", requirement: nil, unavailableReason: nil),
-        SettingsSearchEntry(id: "calendar.eventCalendars", title: "Calendars", category: "Calendar", categoryTitle: "Calendar", section: "Calendars", sectionID: "calendar.calendars", keywords: "selection events", requirement: "calendars", unavailableReason: "Calendar access and Show calendar are required. Calendar names are not indexed."),
-        SettingsSearchEntry(id: "calendar.reminderLists", title: "Reminders", category: "Calendar", categoryTitle: "Calendar", section: "Reminders", sectionID: "calendar.reminders", keywords: "selection tasks", requirement: "reminders", unavailableReason: "Reminder access and Show calendar are required. Reminder list names are not indexed."),
+        SettingsSearchEntry(id: "coursepath.browserConnect", title: "Connect CoursePath", category: "CoursePath", categoryTitle: "CoursePath", section: "CoursePath connection", sectionID: "coursepath.connection", keywords: "connection browser sign in calendar tasks", requirement: "needsCredential", unavailableReason: "Already connected. Use Refresh or Disconnect."),
         SettingsSearchEntry(id: "coursepath.server", title: "Server", category: "CoursePath", categoryTitle: "CoursePath", section: "CoursePath connection", sectionID: "coursepath.connection", keywords: "connection local production", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "coursepath.desktopToken", title: "Desktop access token", category: "CoursePath", categoryTitle: "CoursePath", section: "CoursePath connection", sectionID: "coursepath.connection", keywords: "connection authentication", requirement: "needsCredential", unavailableReason: "A credential is already stored. Disconnect to connect with another token."),
         SettingsSearchEntry(id: "coursepath.connect", title: "Connect", category: "CoursePath", categoryTitle: "CoursePath", section: "CoursePath connection", sectionID: "coursepath.connection", keywords: "connection", requirement: "needsCredential", unavailableReason: "Already connected. Use Refresh or Disconnect."),
@@ -116,8 +121,6 @@ enum SettingsSearchIndex {
         SettingsSearchEntry(id: "about.github", title: "GitHub", category: "About", categoryTitle: "About", section: "About", sectionID: "about.links", keywords: "source license attribution", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "general.quit", title: "Quit app", category: "General", categoryTitle: "General", section: "System features", sectionID: "general.system", keywords: "exit", requirement: nil, unavailableReason: nil),
         SettingsSearchEntry(id: "hud.requestAccessibility", title: "Request Accessibility", category: "HUD", categoryTitle: "HUDs", section: "Replace system HUD", sectionID: "hud.system", keywords: "permission volume brightness", requirement: "needsAccessibility", unavailableReason: "Accessibility access is already granted."),
-        SettingsSearchEntry(id: "calendar.openCalendarSettings", title: "Open Calendar Settings", category: "Calendar", categoryTitle: "Calendar", section: "Calendars", sectionID: "calendar.calendars", keywords: "permission privacy", requirement: "needsCalendarAccess", unavailableReason: "Calendar access is already granted. Select calendars in this section."),
-        SettingsSearchEntry(id: "calendar.openReminderSettings", title: "Open Reminder Settings", category: "Calendar", categoryTitle: "Calendar", section: "Reminders", sectionID: "calendar.reminders", keywords: "permission privacy", requirement: "needsReminderAccess", unavailableReason: "Reminder access is already granted. Select reminder lists in this section."),
     ]
     static func search(_ query: String) -> [SettingsSearchEntry] {
         let terms = normalized(query).split(whereSeparator: \.isWhitespace)

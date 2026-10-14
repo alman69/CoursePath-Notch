@@ -4,10 +4,16 @@ import Foundation
 // HTTP/Keychain/Store integration; it does NOT claim real Clerk or browser E2E.
 @main struct LocalPairingProbe {
     @MainActor static func main() async {
-        struct Input: Decodable { let token, clerkToken, accountId, service: String }
+        struct Input: Codable { let token, clerkToken, accountId, service: String; var rotateOnly: Bool? }
         do {
             let input = try JSONDecoder().decode(Input.self, from: FileHandle.standardInput.readDataToEndOfFile())
             let manual = CoursePathKeychain(service: input.service), paired = CoursePathKeychain(service: input.service + ".paired")
+            if input.rotateOnly == true {
+                let worker = CoursePathAuth(storage: paired, enabled: true)
+                try worker.load(server: .local)
+                _ = try await worker.accessToken(server: .local)
+                print("ROTATION_OK"); return
+            }
             defer { try? manual.delete(server: .local); try? paired.delete(server: .local) }
             let auth = CoursePathAuth(storage: paired, enabled: true)
             let suite = input.service + ".preferences", prefs = UserDefaults(suiteName: suite)!
@@ -25,7 +31,7 @@ import Foundation
             let connected = await store.connectBrowser { url in
                 let requestID = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first!.value!
                 let review = try await website("desktop-pairing/review", body: ["requestId": requestID])
-                guard review["confirmation"] as? String == store.pairingConfirmation else { throw CoursePathError.invalidResponse }
+                guard review["confirmation"] == nil, store.pairingConfirmation != nil else { throw CoursePathError.invalidResponse }
                 let approved = try await website("desktop-pairing/decide", body: ["requestId": requestID, "csrf": review["csrf"]!, "approve": true, "confirmation": store.pairingConfirmation!])
                 guard let callback = approved["callbackURL"] as? String, let url = URL(string: callback) else { throw CoursePathError.invalidResponse }
                 return url
@@ -34,6 +40,22 @@ import Foundation
             // Expire the locally stored access credential, not the fixture session.
             let expired = CoursePathPairedCredential(accessToken: original.accessToken, refreshToken: original.refreshToken, deviceId: original.deviceId, accessExpiresAt: .now.addingTimeInterval(-1), sessionExpiresAt: original.sessionExpiresAt)
             try paired.save(String(decoding: JSONEncoder().encode(expired), as: UTF8.self), server: .local)
+            // Two real processes load the same expired credential. Kernel locking
+            // and fresh Keychain reads must yield one rotation, with no replay revoke.
+            var childInput = input; childInput.rotateOnly = true
+            let data = try JSONEncoder().encode(childInput)
+            let workers = try (0..<2).map { _ -> (Process, Pipe) in
+                let process = Process(), stdin = Pipe(), stdout = Pipe()
+                process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                process.standardInput = stdin; process.standardOutput = stdout; process.standardError = stdout
+                try process.run(); stdin.fileHandleForWriting.write(data); try stdin.fileHandleForWriting.close()
+                return (process, stdout)
+            }
+            for (process, pipe) in workers {
+                process.waitUntilExit()
+                let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                guard process.terminationStatus == 0, output.contains("ROTATION_OK") else { throw CoursePathError.invalidResponse }
+            }
             try auth.load(server: .local)
             guard await store.setTaskCompletion("first", completed: true), store.snapshot?.revision == 2,
                   auth.credential?.refreshToken != original.refreshToken, store.snapshot?.tasks.first?.completed == true else { throw CoursePathError.invalidResponse }
@@ -45,7 +67,7 @@ import Foundation
                   try paired.read(server: .local) == nil else { throw CoursePathError.invalidResponse }
             guard await store.connect(input.token), store.snapshot?.revision == 3 else { throw CoursePathError.invalidResponse }
             store.disconnect()
-            print("PASS: sandboxed pairing code exchange, separate Keychain storage, automatic rotation, completion/restoration after renewal, committed reuse revocation, and manual-token fallback. Browser/Clerk consent was simulated.")
+            print("PASS: sandboxed pairing code exchange, separate Keychain storage, two-process coordinated rotation, completion/restoration after renewal, committed reuse revocation, and manual-token fallback. Browser/Clerk consent was simulated.")
         } catch {
             print("FAIL: \((error as? CoursePathError)?.localizedDescription ?? "Local pairing probe failed.")")
             exit(1)

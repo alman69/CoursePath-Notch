@@ -11,12 +11,14 @@ struct CoursePathConnectionSettings: View {
     var body: some View {
         Form {
             Section("CoursePath connection") {
+#if !COURSEPATH_MVP_RELEASE
                 Picker("Server", selection: Binding(get: { store.server }, set: {
                     pairingTask?.cancel(); browser.cancel(); pastedToken = ""; store.selectServer($0)
                 })) {
                     ForEach(CoursePathServer.allCases) { server in Text(server.label).tag(server) }
                 }
                 Text(store.server.baseURL.absoluteString).font(.caption).foregroundStyle(.secondary)
+#endif
                 if !store.hasCredential {
                     if store.browserPairingEnabled {
                         Button("Connect CoursePath") {
@@ -27,13 +29,11 @@ struct CoursePathConnectionSettings: View {
                             Button("Cancel connection") { pairingTask?.cancel(); browser.cancel() }
                         }
                     }
-                    SecureField("Desktop access token", text: $pastedToken)
-                        .textContentType(.password)
-                    Button("Connect") {
-                        let token = pastedToken; pastedToken = ""
-                        Task { await store.connect(token) }
-                    }
-                    .disabled(store.isBusy || pastedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+#if !COURSEPATH_MVP_RELEASE
+                    if store.browserPairingEnabled {
+                        DisclosureGroup("Manual token (advanced)") { manualTokenControls }
+                    } else { manualTokenControls }
+#endif
                 }
                 HStack {
                     Button("Refresh") { Task { await store.refresh() } }
@@ -54,14 +54,31 @@ struct CoursePathConnectionSettings: View {
             }
             .settingsSearchSection("coursepath.connection")
             Section {
-                Text(store.browserPairingEnabled ? "Connect through your browser and confirm the code shown here. Manual desktop tokens remain available as a development fallback. Credentials stay in this Mac’s Keychain." : "Generate a desktop token in CoursePath Settings → CoursePath Notch. Credentials stay in this Mac’s Keychain. Each server uses its own credential.")
+#if COURSEPATH_MVP_RELEASE
+                Text("Connect through your browser and confirm the code shown here. Credentials stay in this Mac’s Keychain and renew automatically.")
                     .font(.caption).foregroundStyle(.secondary)
+#else
+                Text(store.browserPairingEnabled ? "Connect through your browser and confirm the code shown here. Manual desktop tokens remain available under Advanced. Credentials stay in this Mac’s Keychain." : "Generate a desktop token in CoursePath Settings → CoursePath Notch. Credentials stay in this Mac’s Keychain. Each server uses its own credential.")
+                    .font(.caption).foregroundStyle(.secondary)
+#endif
             }
         }
         .navigationTitle("CoursePath")
         .background(CoursePathSettingsVisibility { visible in store.setContentVisible(visible, source: visibilityID) })
         .onDisappear { pairingTask?.cancel(); browser.cancel(); pastedToken = ""; store.setContentVisible(false, source: visibilityID) }
     }
+#if !COURSEPATH_MVP_RELEASE
+    private var manualTokenControls: some View {
+        Group {
+            SecureField("Desktop access token", text: $pastedToken).textContentType(.password)
+            Button("Connect") {
+                let token = pastedToken; pastedToken = ""
+                Task { await store.connect(token) }
+            }.disabled(store.isBusy || pastedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+#endif
 }
 
 // A closed/minimized/inactive Settings window can keep its hosting view alive.

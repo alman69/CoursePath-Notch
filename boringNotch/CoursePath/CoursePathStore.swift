@@ -19,7 +19,7 @@ final class CoursePathStore: ObservableObject {
     private let api: CoursePathAPI
     private let auth: CoursePathAuth
     @Published private(set) var pairingConfirmation: String?
-    var browserPairingEnabled: Bool { auth.enabled && server != .production }
+    var browserPairingEnabled: Bool { auth.enabled }
     private let credentials: CoursePathCredentialStorage
     private let preferences: UserDefaults
     private let now: () -> Date
@@ -43,7 +43,12 @@ final class CoursePathStore: ObservableObject {
         self.auth = auth ?? CoursePathAuth()
         self.api = api; self.credentials = credentials; self.preferences = preferences; self.now = now; self.pollInterval = pollInterval
         currentDay = CoursePathDate.key(now())
-        server = CoursePathServer(rawValue: preferences.string(forKey: "CoursePath.server") ?? "") ?? .local
+#if COURSEPATH_MVP_RELEASE
+        // A saved developer preset must never redirect a student's public connection.
+        server = .production
+#else
+        server = CoursePathServer(rawValue: preferences.string(forKey: "CoursePath.server") ?? "") ?? CoursePathServer.defaultServer
+#endif
         restoreCredential()
         workspaceObservers.append(workspaceNotifications.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.handleSleep() }
@@ -163,10 +168,11 @@ final class CoursePathStore: ObservableObject {
     }
     func disconnect() {
         cancelRequests(); token = nil; hasCredential = false; snapshot = nil; lastUpdated = nil; lastRequestStarted = nil; lastSnapshotDay = nil
+        // A locked or failing local Keychain must not suppress remote revocation.
+        if let previous = auth.credential { let server = server; Task { try? await auth.revoke(previous, server: server) } }
         do {
-            let previous = try auth.remove(server: server)
+            _ = try auth.remove(server: server)
             try credentials.delete(server: server)
-            if let previous { let server = server; Task { try? await auth.revoke(previous, server: server) } }
             status = .disconnected; message = "Disconnected. Revoke the device in CoursePath Settings to also remove server access." }
         catch { status = .failed; message = error.localizedDescription }
         restartPolling()

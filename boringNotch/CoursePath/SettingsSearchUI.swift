@@ -1,7 +1,6 @@
 import SwiftUI
 import Defaults
 import AVFoundation
-import EventKit
 
 private struct SettingsSearchHighlightKey: EnvironmentKey {
     static let defaultValue: String? = nil
@@ -33,7 +32,6 @@ struct SettingsSearchSidebar: View {
     @State private var accessibilityAuthorized = false
     @FocusState private var searchFocused: Bool
     @ObservedObject private var store = CoursePathStore.shared
-    @ObservedObject private var calendar = CalendarManager.shared
     @Default(.showOnAllDisplays) private var allDisplays
     @Default(.notchHeightMode) private var notchHeightMode
     @Default(.nonNotchHeightMode) private var nonNotchHeightMode
@@ -41,7 +39,6 @@ struct SettingsSearchSidebar: View {
     @Default(.enableGestures) private var gestures
     @Default(.useMusicVisualizer) private var musicVisualizer
     @Default(.customVisualizers) private var visualizers
-    @Default(.showCalendar) private var showCalendar
     @Default(.hudReplacement) private var hud
     @Default(.showOpenNotchHUD) private var openHUD
     @Default(.useCustomAccentColor) private var customAccent
@@ -56,15 +53,11 @@ struct SettingsSearchSidebar: View {
         if gestures { flags.insert("gestures") }
         if !musicVisualizer && !visualizers.isEmpty { flags.insert("animationSelection") }
         if AVCaptureDevice.default(for: .video) != nil { flags.insert("camera") }
-        if showCalendar && EKEventStore.authorizationStatus(for: .event) == .fullAccess { flags.insert("calendars") }
-        if showCalendar && EKEventStore.authorizationStatus(for: .reminder) == .fullAccess { flags.insert("reminders") }
         if !store.hasCredential { flags.insert("needsCredential") }
         if store.hasCredential && !store.isBusy { flags.insert("credential") }
         if store.status != .disconnected { flags.insert("disconnect") }
         if accessibilityAuthorized { flags.insert("accessibility") }
         else { flags.insert("needsAccessibility") }
-        if EKEventStore.authorizationStatus(for: .event) != .fullAccess { flags.insert("needsCalendarAccess") }
-        if EKEventStore.authorizationStatus(for: .reminder) != .fullAccess { flags.insert("needsReminderAccess") }
         if hud { flags.insert("hud") }
         if hud && openHUD { flags.insert("openHUD") }
         if customAccent { flags.insert("customAccent") }
@@ -74,6 +67,7 @@ struct SettingsSearchSidebar: View {
         if entry.category == "CoursePath", store.isBusy, ["connect", "refresh"].contains(entry.id.components(separatedBy: ".").last ?? "") {
             return "A CoursePath request is in progress. Wait for it to finish."
         }
+        if entry.id == "coursepath.browserConnect", !store.browserPairingEnabled { return "Browser pairing is disabled in this development build." }
         if entry.id == "coursepath.connect", !store.hasCredential { return "Enter a desktop access token in CoursePath to enable Connect." }
         return entry.reason(enabled: enabled)
     }

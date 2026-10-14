@@ -3,12 +3,14 @@ import CryptoKit
 @testable import CoursePathConnection
 
 private final class AuthStorage: CoursePathCredentialStorage {
+    var coordinationNamespace: String? = "test." + UUID().uuidString
     var values: [CoursePathServer: String] = [:]
     var writes = 0
     var failure: CoursePathError?
+    var deletionFailure: CoursePathError?
     func read(server: CoursePathServer) throws -> String? { values[server] }
     func save(_ token: String, server: CoursePathServer) throws { if let failure { throw failure }; values[server] = token; writes += 1 }
-    func delete(server: CoursePathServer) throws { values.removeValue(forKey: server) }
+    func delete(server: CoursePathServer) throws { if let deletionFailure { throw deletionFailure }; values.removeValue(forKey: server) }
 }
 @MainActor
 private final class AuthAPI: CoursePathAuthAPI {
@@ -16,6 +18,7 @@ private final class AuthAPI: CoursePathAuthAPI {
     var renewals = 0, exchanges = 0, cancellations = 0, revocations = 0
     var held: CheckedContinuation<CoursePathPairedCredential, Error>?
     var hold = false
+    var cancelDuringExchange = false
     var error: CoursePathError?
     var now: () -> Date = Date.init
     let deviceID = UUID().uuidString
@@ -27,7 +30,9 @@ private final class AuthAPI: CoursePathAuthAPI {
         return CoursePathPairing(requestId: String(repeating: "a", count: 43), authorizationURL: "http://127.0.0.1:5173/desktop/connect?request=" + String(repeating: "a", count: 43), confirmation: "1234ABCD", expiresIn: 300)
     }
     func exchange(server: CoursePathServer, code: String, verifier: String) async throws -> CoursePathPairedCredential {
-        XCTAssertEqual(verifier, started?.verifier); exchanges += 1; return value()
+        XCTAssertEqual(verifier, started?.verifier); exchanges += 1
+        if cancelDuringExchange { withUnsafeCurrentTask { $0?.cancel() } }
+        return value()
     }
     func renew(server: CoursePathServer, refreshToken: String) async throws -> CoursePathPairedCredential {
         renewals += 1
@@ -35,8 +40,8 @@ private final class AuthAPI: CoursePathAuthAPI {
         if hold { return try await withCheckedThrowingContinuation { held = $0 } }
         return value("b")
     }
-    func revoke(server: CoursePathServer, refreshToken: String) async throws { revocations += 1 }
-    func cancel(server: CoursePathServer, requestId: String, verifier: String) async throws { cancellations += 1 }
+    func revoke(server: CoursePathServer, refreshToken: String) async throws { XCTAssertFalse(Task.isCancelled); revocations += 1 }
+    func cancel(server: CoursePathServer, requestId: String, verifier: String) async throws { XCTAssertFalse(Task.isCancelled); cancellations += 1 }
     func callback() -> URL { URL(string: CoursePathPKCE.callback + "?state=" + started!.state + "&code=" + String(repeating: "c", count: 43))! }
 }
 private final class PairedCalendarAPI: CoursePathAPI {
@@ -86,15 +91,12 @@ final class CoursePathAuthTests: XCTestCase {
         XCTAssertEqual(api.renewals, 0); XCTAssertEqual(try manual.read(server: .local), manualValue)
         _ = try restored.remove(server: .local); XCTAssertNil(try storage.read(server: .local)); XCTAssertEqual(try manual.read(server: .local), manualValue)
     }
-    func testDisabledAndProductionPairingCannotConnectOrReadStoredCredentials() async throws {
+    func testDisabledPairingCannotConnectOrReadStoredCredentials() async throws {
         let api = AuthAPI(), storage = AuthStorage()
         storage.values[.local] = String(decoding: try JSONEncoder().encode(api.value()), as: UTF8.self)
         let disabled = CoursePathAuth(api: api, storage: storage, enabled: false)
         try disabled.load(server: .local); XCTAssertNil(disabled.credential)
         do { try await disabled.authorize(server: .local, confirmation: { _ in }, browser: { _ in api.callback() }); XCTFail() } catch {}
-        let enabled = CoursePathAuth(api: api, storage: storage, enabled: true)
-        try enabled.load(server: .production); XCTAssertNil(enabled.credential)
-        do { try await enabled.authorize(server: .production, confirmation: { _ in }, browser: { _ in api.callback() }); XCTFail() } catch {}
         XCTAssertNil(api.started); XCTAssertEqual(storage.writes, 0)
     }
     func testCancellationAndIncorrectCallbackDoNotExchangeOrPersistCredentials() async throws {
@@ -205,6 +207,73 @@ final class CoursePathAuthTests: XCTestCase {
         XCTAssertThrowsError(try auth.load(server: .local))
         XCTAssertNil(paired.values[.local]); XCTAssertNil(auth.credential)
         XCTAssertNoThrow(try auth.load(server: .local))
+    }
+
+    func testActualTaskCancellationCleansUpBeforeAndAfterExchange() async throws {
+        for afterExchange in [false, true] {
+            let api = AuthAPI(), storage = AuthStorage(), auth = CoursePathAuth(api: api, storage: storage, enabled: true)
+            api.cancelDuringExchange = afterExchange
+            let task = Task {
+                try auth.load(server: .local)
+                try await auth.authorize(server: .local, confirmation: { _ in }, browser: { _ in
+                    if !afterExchange { withUnsafeCurrentTask { $0?.cancel() } }
+                    return api.callback()
+                })
+            }
+            do { try await task.value; XCTFail() } catch {}
+            XCTAssertEqual(api.cancellations, 1); XCTAssertEqual(api.revocations, afterExchange ? 1 : 0)
+            XCTAssertNil(auth.credential); XCTAssertTrue(storage.values.isEmpty)
+        }
+    }
+    func testSeparateOwnersRereadStorageUnderKernelLockBeforeRotating() async throws {
+        var clock = Date(); let api = AuthAPI(), storage = AuthStorage(); api.now = { clock }
+        let first = CoursePathAuth(api: api, storage: storage, now: { clock }, enabled: true)
+        try await connected(first, api: api)
+        let second = CoursePathAuth(api: api, storage: storage, now: { clock }, enabled: true)
+        try second.load(server: .local); clock.addTimeInterval(601); api.hold = true
+        let a = Task { try await first.accessToken(server: .local) }
+        while api.held == nil { await Task.yield() }
+        let b = Task { try await second.accessToken(server: .local) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(api.renewals, 1)
+        api.held?.resume(returning: api.value("b"))
+        let av = try await a.value, bv = try await b.value
+        XCTAssertEqual(av, bv); XCTAssertEqual(api.renewals, 1); XCTAssertEqual(storage.writes, 2)
+    }
+    func testDefinitiveRejectionsRetainCredentialsForRetry() async throws {
+        for status in [429, 503] {
+            var clock = Date(); let api = AuthAPI(), storage = AuthStorage(); api.now = { clock }
+            let auth = CoursePathAuth(api: api, storage: storage, now: { clock }, enabled: true)
+            try await connected(auth, api: api); clock.addTimeInterval(601); api.error = .http(status)
+            do { _ = try await auth.accessToken(server: .local); XCTFail() } catch {}
+            XCTAssertNotNil(storage.values[.local]); api.error = nil
+            let token = try await auth.accessToken(server: .local)
+            XCTAssertEqual(token, api.value("b").accessToken); XCTAssertEqual(api.renewals, 2)
+        }
+    }
+
+    func testDisconnectRevokesEvenWhenLocalCredentialDeletionFails() async throws {
+        let api = AuthAPI(), paired = AuthStorage(), auth = CoursePathAuth(api: api, storage: paired, enabled: true)
+        let suite = "dev.coursepath.notch.disconnect-test." + UUID().uuidString, prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        let store = CoursePathStore(api: PairedCalendarAPI(), credentials: AuthStorage(), preferences: prefs, auth: auth)
+        let connected = await store.connectBrowser { _ in api.callback() }; XCTAssertTrue(connected)
+        paired.deletionFailure = .keychain(-25308)
+        store.disconnect()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(api.revocations, 1); XCTAssertEqual(store.status, .failed)
+        XCTAssertNotNil(paired.values[.local]); XCTAssertFalse(store.hasCredential)
+    }
+
+    func testProductionBrowserUsesOnlyTheExactHTTPSIssuerAndKeepsDevelopmentSeparate() throws {
+        let id = String(repeating: "a", count: 43)
+        let production = CoursePathPairing(requestId: id, authorizationURL: "https://app.coursepath.dev/desktop/connect?request=" + id, confirmation: "1234ABCD", expiresIn: 300)
+        XCTAssertEqual(try production.browserURL(server: .production).host, "app.coursepath.dev")
+        XCTAssertThrowsError(try production.browserURL(server: .local))
+        for origin in ["http://app.coursepath.dev", "https://coursepath.dev", "https://app.coursepath.dev.evil.example", "https://app.coursepath.dev:8443", "https://user@app.coursepath.dev"] {
+            let value = CoursePathPairing(requestId: id, authorizationURL: origin + "/desktop/connect?request=" + id, confirmation: "1234ABCD", expiresIn: 300)
+            XCTAssertThrowsError(try value.browserURL(server: .production))
+        }
     }
 
 }

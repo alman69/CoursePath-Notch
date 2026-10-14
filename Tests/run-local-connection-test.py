@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix="coursepath-native-e2e-") as temporary:
         models.write_text((notch / "boringNotch/CoursePath/CoursePathModels.swift").read_text().replace(
             '"http://127.0.0.1:5173"', '"' + test_url + '"'))
         sources = [models] + [notch / "boringNotch/CoursePath" / file for file in
-                   ["CoursePathAPI.swift", "CoursePathAuth.swift", "CoursePathKeychain.swift", "CoursePathStore.swift", "CoursePathTaskPresentation.swift"]]
+                   ["CoursePathAPI.swift", "CoursePathAuth.swift", "CoursePathKeychain.swift", "CoursePathCredentialLock.swift", "CoursePathStore.swift", "CoursePathTaskPresentation.swift"]]
         subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-target", os.uname().machine + "-apple-macosx14.0",
                         *map(str, sources), str(notch / ("Tests/LocalPairingProbe.swift" if pairing else "Tests/LocalConnectionProbe.swift")), "-o", str(executable)], check=True)
         subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(notch / "boringNotch/boringNotch.entitlements"), str(bundle)], check=True, capture_output=True)

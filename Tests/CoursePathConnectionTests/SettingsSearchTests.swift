@@ -42,7 +42,7 @@ final class SettingsSearchTests: XCTestCase {
     func testCatalogHasUniqueIdentitiesExactLabelsAndRealAnchors() throws {
         let entries = SettingsSearchIndex.entries
         XCTAssertEqual(Set(entries.map(\.id)).count, entries.count)
-        XCTAssertEqual(Set(entries.map(\.category)), Set(["General", "Appearance", "Media", "Calendar", "CoursePath", "HUD", "Battery", "Shelf", "Shortcuts", "Advanced", "About"]))
+        XCTAssertEqual(Set(entries.map(\.category)), Set(["General", "Appearance", "Media", "CoursePath", "HUD", "Battery", "Shelf", "Shortcuts", "Advanced", "About"]))
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let settings = try String(contentsOf: root.appendingPathComponent("boringNotch/components/Settings/SettingsView.swift"))
         let connection = try String(contentsOf: root.appendingPathComponent("boringNotch/CoursePath/CoursePathConnectionSettings.swift"))
@@ -53,6 +53,13 @@ final class SettingsSearchTests: XCTestCase {
             XCTAssertTrue(source.contains(entry.title), entry.id + " label no longer exists")
             XCTAssertFalse(entry.id.contains("Downloads")); XCTAssertFalse(entry.id.contains("Extensions"))
         }
+    }
+    func testPublicCatalogExcludesRetiredCalendarAndDeveloperConnections() {
+        XCTAssertFalse(SettingsSearchIndex.entries.contains { $0.category == "Calendar" || $0.id.hasPrefix("calendar.") })
+        let entries = SettingsSearchIndex.publicEntries
+        XCTAssertFalse(entries.contains { ["coursepath.server", "coursepath.desktopToken", "coursepath.connect"].contains($0.id) })
+        XCTAssertTrue(entries.contains { $0.id == "coursepath.browserConnect" && $0.title == "Connect CoursePath" && $0.sectionID == "coursepath.connection" })
+        XCTAssertTrue(entries.contains { $0.id == "coursepath.disconnect" })
     }
     func testRememberAllTabsAndOriginalDefaults() {
         for tab in NotchViews.allCases {

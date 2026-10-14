@@ -2,6 +2,13 @@ import Foundation
 
 enum CoursePathServer: String, CaseIterable, Identifiable {
     case local, localAPI, production
+    static var defaultServer: CoursePathServer {
+        #if COURSEPATH_MVP_RELEASE
+        .production
+        #else
+        .local
+        #endif
+    }
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -78,7 +85,7 @@ enum CoursePathError: Error, LocalizedError, Equatable {
     case unauthorized, conflict, invalidToken, invalidResponse, offline, timeout, http(Int), keychain(Int32)
     var errorDescription: String? {
         switch self {
-        case .unauthorized: return "Access expired or was revoked. Generate a new token in CoursePath Settings."
+        case .unauthorized: return "Connection expired or was revoked. Connect CoursePath again."
         case .conflict: return "The calendar changed. Refresh before updating this task."
         case .invalidToken: return "Paste a valid CoursePath desktop token."
         case .invalidResponse: return "CoursePath returned an invalid response."
